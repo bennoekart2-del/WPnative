@@ -164,6 +164,11 @@ void ppc_call_indirect(PPCContext* c, uint32_t addr);
 void ppc_rfi(PPCContext* c);
 void ppc_check_irq(PPCContext* c);
 extern volatile int g_irq_pending;
+/* Guest setjmp call sites: the host frame that called setjmp is where a later guest longjmp to the
+ * same buffer resumes (see threads.c, hle_longjmp). */
+void** wpr_setjmp_begin(PPCContext* c);
+#define PPC_SETJMP(c, fn) do { if (__builtin_setjmp(wpr_setjmp_begin(c)) == 0) fn(c); } while (0)
+
 #define PPC_SAFEPOINT(c) do { if (g_irq_pending) ppc_check_irq(c); } while (0)
 void ppc_unimpl(PPCContext* c, uint32_t addr, uint32_t word);
 

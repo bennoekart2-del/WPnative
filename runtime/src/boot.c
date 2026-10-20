@@ -7,6 +7,7 @@
 
 #include "ppc_context.h"
 #include "runtime.h"
+void hw_vi_set_format(int pal);
 
 #define GUEST_MEM_SIZE 0x18040000u /* MEM1 (phys 0x0), MEM2 (phys 0x10000000), locked cache */
 
@@ -70,6 +71,7 @@ int boot_load(const char* disc_root, uint32_t* entry_out) {
     mem_w32(0x80000030, 0x00000000);  /* arena low */
     mem_w32(0x80000034, fst_addr);    /* arena high */
     mem_w32(0x800000CC, (g_mem[3] == 'E' || g_mem[3] == 'J') ? 0 : 1); /* video: NTSC 0 / PAL 1 */
+    hw_vi_set_format(mem_r32(0x800000CC) == 1);
     mem_w32(0x800000F0, 0x01800000);  /* simulated memory size */
     mem_w32(0x800000F8, 0x0E7BE2C0);  /* bus clock 243 MHz */
     mem_w32(0x800000FC, 0x2B73A840);  /* CPU clock 729 MHz */

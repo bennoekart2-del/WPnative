@@ -40,8 +40,12 @@ static void vi_update_irq(void) {
 }
 
 void vi_retrace(void) {
-    uint16_t* di0 = &vi_regs[0x30 / 2];
-    if (*di0 & 0x1000) { *di0 |= 0x8000; vi_update_irq(); }
+    /* both the pre-retrace (DI0) and post-retrace (DI1) interrupts the VI library programs */
+    for (int i = 0; i < 2; i++) {
+        uint16_t* di = &vi_regs[(0x30 + 4 * i) / 2];
+        if (*di & 0x1000) *di |= 0x8000;
+    }
+    vi_update_irq();
 }
 
 void hw_vi_write(uint32_t addr, uint32_t val, int size) {
@@ -49,6 +53,25 @@ void hw_vi_write(uint32_t addr, uint32_t val, int size) {
     if (size == 4) { vi_regs[r] = (uint16_t)(val >> 16); vi_regs[r + 1] = (uint16_t)val; }
     else vi_regs[r] = (uint16_t)val;
     if ((addr & 0xFF) >= 0x30 && (addr & 0xFF) < 0x40) vi_update_irq();
+}
+
+/* The VI comes out of the IPL already running in the console's video standard, and VIInit takes
+ * over that state (it only programs the VI itself when DCR.ENB is clear). Register values from
+ * Dolphin's VideoInterfaceManager::Preset; DCR bits 8-9 are the format (0 NTSC, 1 PAL). */
+static void vi_set32(uint32_t off, uint32_t v) { vi_regs[off / 2] = (uint16_t)(v >> 16); vi_regs[off / 2 + 1] = (uint16_t)v; }
+
+void hw_vi_set_format(int pal) {
+    vi_regs[0x00 / 2] = (uint16_t)(6 | 0 << 4);                    /* VTR: EQU 6, ACV 0 */
+    vi_regs[0x02 / 2] = (uint16_t)(1 | (pal ? 1u : 0u) << 8);      /* DCR: enabled, format */
+    vi_set32(0x04, 429u | 105u << 16 | 71u << 24);                 /* HTR0: HLW, HCE, HCS */
+    vi_set32(0x08, 64u | 162u << 7 | 373u << 17);                  /* HTR1: HSY, HBE640, HBS640 */
+    vi_set32(0x0C, 502u | 5u << 16);                               /* VTO: PRB, PSB */
+    vi_set32(0x10, 503u | 4u << 16);                               /* VTE */
+    vi_set32(0x14, 12u | 520u << 5 | 12u << 16 | 520u << 21);      /* BBOI */
+    vi_set32(0x18, 13u | 519u << 5 | 13u << 16 | 519u << 21);      /* BBEI */
+    vi_set32(0x30, 430u | 263u << 16 | 1u << 28);                  /* DI0 */
+    vi_set32(0x34, 1u | 1u << 16 | 1u << 28);                      /* DI1 */
+    vi_regs[0x48 / 2] = (uint16_t)(40 | 40 << 8);                  /* picture config: STD, WPL */
 }
 
 /* Top field framebuffer address: VI_TFBL at 0x1C (bit 28 = shift by 5). */

@@ -12,8 +12,26 @@ from collections import Counter
 from ppc import Insn, bits, mask32, sext
 
 
-def h(v: int) -> str:
+def h(v) -> str:
+    if isinstance(v, SymImm):
+        return v.expr
     return f"0x{v & 0xFFFFFFFF:08X}u"
+
+
+class SymImm:
+    """An immediate patched at load time (REL relocation): read from the linked code in guest memory."""
+
+    def __init__(self, expr: str):
+        self.expr = expr
+
+    def __lshift__(self, n: int) -> "SymImm":
+        return SymImm(f"({self.expr} << {n})")
+
+    def __format__(self, spec: str) -> str:
+        return f"(int32_t){self.expr}"
+
+    def __eq__(self, other): return False
+    def __hash__(self): return id(self)
 
 
 def lbl(addr: int) -> str:
@@ -33,8 +51,9 @@ def cr0(reg: str) -> str:
 
 
 class Emitter:
-    def __init__(self, known_functions: set[int]):
+    def __init__(self, known_functions: set[int], setjmp_addr: int | None = None):
         self.known = known_functions
+        self.setjmp_addr = setjmp_addr
         self.coverage: Counter[str] = Counter()
         self.called_externally: set[int] = set()
 
@@ -53,14 +72,23 @@ class Emitter:
     def _goto_or_call(self, target: int, start: int, end: int, link: bool, ret_addr: int) -> str:
         if link:
             self.called_externally.add(target)
-            return f"c->lr = {h(ret_addr)}; {fn(target)}(c);"
+            if target == self.setjmp_addr:
+                return f"c->lr = {self.addr_expr(ret_addr)}; PPC_SETJMP(c, {fn(target)});"
+            return f"c->lr = {self.addr_expr(ret_addr)}; {self.call_expr(target)}"
         if start <= target < end:
             if target <= self.cur:
                 return f"PPC_SAFEPOINT(c); goto {lbl(target)};"
             return f"goto {lbl(target)};"
         # branch out of the function: tail call
         self.called_externally.add(target)
-        return f"{fn(target)}(c); return;"
+        return f"{self.call_expr(target)} return;"
+
+    def addr_expr(self, addr: int) -> str:
+        """C expression for a guest code address as the running program sees it (LR values)."""
+        return h(addr)
+
+    def call_expr(self, target: int) -> str:
+        return f"{fn(target)}(c);"
 
     # ---------------------------------------------------------------- main entry
     def emit(self, i: Insn, start: int, end: int) -> list[str]:
@@ -129,14 +157,14 @@ class Emitter:
         if xo == 16:  # bclr
             pre, cond = self._cond(i)
             if i.lk:
-                body = f"{{ uint32_t t = c->lr; c->lr = {h(i.addr + 4)}; ppc_call_indirect(c, t); }}"
+                body = f"{{ uint32_t t = c->lr; c->lr = {self.addr_expr(i.addr + 4)}; ppc_call_indirect(c, t); }}"
             else:
                 body = "return;"
             return pre + [f"if ({cond}) {body}"]
         if xo == 528:  # bcctr
             pre, cond = self._cond(i)
             if i.lk:
-                body = f"{{ c->lr = {h(i.addr + 4)}; ppc_call_indirect(c, c->ctr); }}"
+                body = f"{{ c->lr = {self.addr_expr(i.addr + 4)}; ppc_call_indirect(c, c->ctr); }}"
             else:
                 body = "{ BCTR_DISPATCH; }"
             return pre + [f"if ({cond}) {body}"]

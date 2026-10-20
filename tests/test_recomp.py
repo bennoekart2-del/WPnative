@@ -113,6 +113,7 @@ extern const uint32_t g_recomp_entry;
 uint32_t mmio_read(uint32_t a, int s) { (void)a; (void)s; return 0; }
 void mmio_write(uint32_t a, uint32_t v, int s) { (void)a; (void)v; (void)s; }
 PPCFunc ppc_hle_lookup(uint32_t a) { (void)a; return NULL; }
+PPCFunc rel_lookup(uint32_t a) { (void)a; return NULL; }
 uint64_t host_ticks_ns(void) { return 0; }
 volatile int g_irq_pending;
 void ppc_check_irq(PPCContext* c) { (void)c; }

@@ -22,7 +22,7 @@
 #include "ppc_context.h"
 #include "runtime.h"
 
-#define MAX_THREADS 64
+#define MAX_THREADS 256
 
 typedef struct {
     uint32_t ctx;          /* guest OSContext address this host thread owns */
@@ -31,7 +31,14 @@ typedef struct {
     int used;
     int in_irq;
     uint32_t irq_ctx;      /* context handed to the exception handler running on this thread */
+    /* coroutines (guest setjmp/longjmp stack switching), see hle_longjmp */
+    int is_coro, cmd;
+    void** resume;         /* host setjmp buffer to resume at (cmd == CORO_RESUME) */
+    uint32_t entry;        /* guest address to start at (cmd == CORO_START) */
+    void* top[5];          /* host buffer at the coroutine thread's base, for restarts */
 } GuestThread;
+
+enum { CORO_NONE, CORO_RESUME, CORO_START };
 
 static GuestThread threads[MAX_THREADS];
 static SDL_Mutex* table_lock;
@@ -44,11 +51,23 @@ static SDL_AtomicInt dec_fired;
 
 static GuestThread* self(void) { return SDL_GetTLS(&tls_self); }
 
+static void spawn(SDL_ThreadFunction fn, const char* name, size_t stack, void* arg) {
+    SDL_PropertiesID p = SDL_CreateProperties();
+    SDL_SetPointerProperty(p, SDL_PROP_THREAD_CREATE_ENTRY_FUNCTION_POINTER, (void*)fn);
+    SDL_SetStringProperty(p, SDL_PROP_THREAD_CREATE_NAME_STRING, name);
+    SDL_SetPointerProperty(p, SDL_PROP_THREAD_CREATE_USERDATA_POINTER, arg);
+    SDL_SetNumberProperty(p, SDL_PROP_THREAD_CREATE_STACKSIZE_NUMBER, (Sint64)stack);
+    SDL_Thread* t = SDL_CreateThreadWithProperties(p);
+    SDL_DestroyProperties(p);
+    if (!t) { fprintf(stderr, "[thread] cannot create host thread: %s\n", SDL_GetError()); abort(); }
+    SDL_DetachThread(t);
+}
+
 static GuestThread* alloc_thread(uint32_t ctx, PPCContext* cpu) {
     SDL_LockMutex(table_lock);
     for (int i = 0; i < MAX_THREADS; i++) {
         if (!threads[i].used) {
-            threads[i] = (GuestThread){ctx, SDL_CreateSemaphore(0), cpu, 1, 0, 0};
+            threads[i] = (GuestThread){ctx, SDL_CreateSemaphore(0), cpu, 1, 0, 0, 0, 0, NULL, 0, {0}};
             SDL_UnlockMutex(table_lock);
             return &threads[i];
         }
@@ -152,9 +171,121 @@ void hle_OSLoadContext(PPCContext* c) {
         PPCContext* nc = calloc(1, sizeof *nc);
         ctx_load(nc, ctx);
         t = alloc_thread(ctx, nc);
-        SDL_DetachThread(SDL_CreateThreadWithStackSize(guest_entry, "guest", 1 << 20, t));
+        spawn(guest_entry, "guest", 1 << 20, t);
     }
     switch_to(t);
+}
+
+/* ------------------------------------------------------------------ coroutines: setjmp / longjmp
+ *
+ * The game's task system gives every task its own stack and switches between them with setjmp and
+ * longjmp (fill a jmp_buf with setjmp, then point its LR/SP at a trampoline and a fresh stack).
+ * Recompiled code cannot jump into the middle of a C function, so each guest stack becomes a host
+ * thread, and only one runs at a time (same baton as OS threads):
+ *
+ *   setjmp call sites run a host setjmp first (PPC_SETJMP), remembering which host thread and
+ *   which host frame the guest buffer belongs to, and the LR/SP the guest saved.
+ *   longjmp(buf) to a buffer still holding those LR/SP resumes that frame: directly on the same
+ *   host thread, otherwise by waking its thread. A buffer with a rewritten LR/SP starts a new
+ *   coroutine at that LR (reusing the thread that last owned the buffer when possible).
+ *
+ * The running guest OS thread's identity (its OSContext) moves along with every switch.
+ */
+#define MAX_JMP 512
+typedef struct { uint32_t buf, lr, sp; GuestThread* owner; void* jb[5]; } JmpSlot;
+static JmpSlot jslots[MAX_JMP];
+
+static JmpSlot* jslot(uint32_t buf, int create) {
+    for (int i = 0; i < MAX_JMP; i++) if (jslots[i].buf == buf) return &jslots[i];
+    if (!create) return NULL;
+    for (int i = 0; i < MAX_JMP; i++) if (!jslots[i].buf) { jslots[i].buf = buf; return &jslots[i]; }
+    fprintf(stderr, "[coro] out of jmp_buf slots\n");
+    abort();
+}
+
+void** wpr_setjmp_begin(PPCContext* c) {
+    JmpSlot* s = jslot(c->r[3], 1);
+    s->owner = self();
+    s->lr = c->lr;
+    s->sp = c->r[1];
+    return s->jb;
+}
+
+static void jmp_restore(PPCContext* c, uint32_t buf, uint32_t v) {
+    c->lr = mem_r32(buf);
+    ppc_mtcrf(c, 0xFF, mem_r32(buf + 4));
+    c->r[1] = mem_r32(buf + 8);
+    c->r[2] = mem_r32(buf + 0xC);
+    for (int r = 13; r < 32; r++) c->r[r] = mem_r32(buf + 0x14 + 4 * (uint32_t)(r - 13));
+    for (int f = 14; f < 32; f++) {
+        uint32_t o = buf + 0x60 + 0x10 * (uint32_t)(f - 14);
+        c->f[f].u = mem_r64(o);
+        ppc_psq_l(c, (uint32_t)f, o + 8, 0, 0);
+    }
+    c->fpscr = (uint32_t)mem_r64(buf + 0x180);
+    c->r[3] = v ? v : 1;
+}
+
+static void coro_dispatch(GuestThread* me) {
+    int cmd = me->cmd;
+    me->cmd = CORO_NONE;
+    if (cmd == CORO_RESUME) __builtin_longjmp(me->resume, 1);
+    if (cmd == CORO_START) __builtin_longjmp(me->top, 1);
+    fprintf(stderr, "[coro] woken without a command\n");
+    abort();
+}
+
+static int SDLCALL coro_main(void* arg) {
+    GuestThread* t = arg;
+    SDL_SetTLS(&tls_self, t, NULL);
+    SDL_WaitSemaphore(t->run);
+    if (__builtin_setjmp(t->top) == 0) t->cmd = CORO_START;
+    t->cmd = CORO_NONE;
+    for (;;) {
+        /* LR = entry when it starts, so a guest return from it re-enters it, as on hardware */
+        ppc_call_indirect(t->cpu, t->entry);
+    }
+    return 0;
+}
+
+static void coro_switch(GuestThread* me, GuestThread* t) {
+    t->ctx = me->ctx;
+    me->ctx = 0;
+    switch_to(t);
+    coro_dispatch(me);
+}
+
+void hle_longjmp(PPCContext* c) {
+    uint32_t buf = c->r[3], v = c->r[4];
+    uint32_t lr = mem_r32(buf), sp = mem_r32(buf + 8);
+    GuestThread* me = self();
+    JmpSlot* s = jslot(buf, 0);
+    if (s && s->owner && s->lr == lr && s->sp == sp) {
+        GuestThread* t = s->owner;
+        if (t == me) {
+            jmp_restore(c, buf, v);
+            __builtin_longjmp(s->jb, 1);
+        }
+        *t->cpu = *c;
+        jmp_restore(t->cpu, buf, v);
+        t->cmd = CORO_RESUME;
+        t->resume = s->jb;
+        coro_switch(me, t);
+    }
+    GuestThread* t = (s && s->owner && s->owner->is_coro && s->owner != me) ? s->owner : NULL;
+    if (s) s->owner = NULL;
+    int fresh = t == NULL;
+    if (fresh) {
+        t = alloc_thread(0, calloc(1, sizeof(PPCContext)));
+        t->is_coro = 1;
+    }
+    *t->cpu = *c;
+    jmp_restore(t->cpu, buf, v);
+    t->entry = lr;
+    t->cmd = CORO_START;
+    TTRACE("[coro] start %08X sp %08X on %s thread\n", lr, sp, fresh ? "new" : "reused");
+    if (fresh) spawn(coro_main, "coro", 4 << 20, t);
+    coro_switch(me, t);
 }
 
 /* ------------------------------------------------------------------ interrupts */

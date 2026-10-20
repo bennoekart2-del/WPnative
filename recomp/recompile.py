@@ -39,6 +39,10 @@ class Image:
     def contains(self, addr: int) -> bool:
         return any(lo <= addr < hi for lo, hi, _ in self.ranges)
 
+    def insn(self, addr: int, emit: bool = False) -> Insn:
+        """Decoded instruction at addr. Subclasses (REL images) add relocation info."""
+        return Insn(addr, self.word(addr))
+
     def word(self, addr: int) -> int:
         for lo, hi, data in self.ranges:
             if lo <= addr < hi:
@@ -61,7 +65,7 @@ def jump_table_targets(img: Image, start: int, bctr_addr: int) -> list[int]:
     consts: dict[int, int] = {}
     table, bound = None, None
     for a in range(start, bctr_addr, 4):
-        i = Insn(a, img.word(a))
+        i = img.insn(a)
         op = i.opcd
         if op == 15 and i.ra == 0:
             consts[i.rd] = (i.uimm << 16) & 0xFFFFFFFF
@@ -105,7 +109,7 @@ def pointer_candidates(img: Image) -> set[int]:
     for lo, hi, data in img.ranges:
         hi_reg: dict[int, int] = {}
         for off in range(0, hi - lo, 4):
-            i = Insn(lo + off, struct.unpack_from(">I", data, off)[0])
+            i = img.insn(lo + off)
             if i.opcd == 15 and i.ra == 0:
                 hi_reg[i.rd] = i.uimm << 16
             elif i.opcd == 14 and i.ra in hi_reg:
@@ -115,8 +119,17 @@ def pointer_candidates(img: Image) -> set[int]:
     for lo, hi, data in img.all:
         for off in range(0, (hi - lo) & ~3, 4):
             cands.add(struct.unpack_from(">I", data, off)[0])
+    # switch jump-table entries look exactly like code pointers; they are labels, not functions
+    jt = set()
+    for lo, hi, data in img.ranges:
+        for off in range(0, hi - lo, 4):
+            a = lo + off
+            if img.insn(a).is_bctr():
+                jt.update(jump_table_targets(img, max(lo, a - 0x100), a))
     out = set()
     for t in cands:
+        if t in jt:
+            continue
         if t & 3 or not img.contains(t) or img.word(t) == 0:
             continue
         if not img.contains(t - 4) or _ends_block(img.word(t - 4)):
@@ -135,7 +148,7 @@ def discover_functions(img: Image, entries: list[int]) -> dict[int, int]:
     starts = set(e for e in entries if img.contains(e))
     for lo, hi, data in img.ranges:
         for off in range(0, hi - lo, 4):
-            i = Insn(lo + off, struct.unpack_from(">I", data, off)[0])
+            i = img.insn(lo + off)
             if i.is_call():
                 t = i.branch_target()
                 if img.contains(t):
@@ -153,7 +166,7 @@ def discover_functions(img: Image, entries: list[int]) -> dict[int, int]:
                 while a < hi:
                     if a != s and a in starts:
                         break
-                    i = Insn(a, img.word(a))
+                    i = img.insn(a)
                     if i.word == 0:
                         break
                     t = i.branch_target()
@@ -171,7 +184,7 @@ def discover_functions(img: Image, entries: list[int]) -> dict[int, int]:
         missing = set()
         for fs, fe in funcs.items():
             for a in range(fs, fe, 4):
-                i = Insn(a, img.word(a))
+                i = img.insn(a)
                 t = i.branch_target()
                 if t is not None and not (fs <= t < fe) and t not in funcs and img.contains(t):
                     missing.add(t)
@@ -180,8 +193,8 @@ def discover_functions(img: Image, entries: list[int]) -> dict[int, int]:
         starts |= missing
 
 
-def emit_function(em: Emitter, img: Image, start: int, end: int) -> str:
-    insns = [Insn(a, img.word(a)) for a in range(start, end, 4)]
+def emit_function(em: Emitter, img: Image, start: int, end: int, ctr_expr: str = "c->ctr") -> str:
+    insns = [img.insn(a, emit=True) for a in range(start, end, 4)]
     targets = {start}
     has_bctr = False
     for i in insns:
@@ -194,7 +207,7 @@ def emit_function(em: Emitter, img: Image, start: int, end: int) -> str:
     if has_bctr:
         # bctr can land anywhere in the function (switch jump tables): dispatch on every address.
         cases = " ".join(f"case {h(i.addr)}: goto {lbl(i.addr)};" for i in insns)
-        out.append(f"#define BCTR_DISPATCH switch (c->ctr) {{ {cases} default: ppc_call_indirect(c, c->ctr); return; }}")
+        out.append(f"#define BCTR_DISPATCH switch ({ctr_expr}) {{ {cases} default: ppc_call_indirect(c, c->ctr); return; }}")
     else:
         out.append("#define BCTR_DISPATCH ppc_call_indirect(c, c->ctr); return;")
     for i in insns:
@@ -227,11 +240,13 @@ def main() -> int:
     funcs = discover_functions(img, [dol.entry])
     # Any guest address that is also in the table but outside known code would be a stub.
     externals = set()
-    em = Emitter(set(funcs))
-    hle = {}
+    hle, setjmp_addr = {}, None
     if args.hle:
         with open(args.hle) as f:
-            hle = {int(k, 16): v for k, v in json.load(f).items() if not k.startswith("_")}
+            cfg = json.load(f)
+        hle = {int(k, 16): v for k, v in cfg.items() if not k.startswith("_")}
+        setjmp_addr = int(cfg["_setjmp"], 16) if "_setjmp" in cfg else None
+    em = Emitter(set(funcs), setjmp_addr)
     os.makedirs(args.out, exist_ok=True)
 
     items = sorted(funcs.items())

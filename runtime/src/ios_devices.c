@@ -360,10 +360,13 @@ const IosDevice* ios_find_device(const char* path) {
     return NULL;
 }
 
+void nand_create_defaults(const char* root, void (*mkdirs)(const char*));
+
 void ios_set_disc_root(const char* root) {
     snprintf(disc_root, sizeof disc_root, "%s", root);
     const char* env = getenv("WPR_NAND");
     if (env) snprintf(nand_root, sizeof nand_root, "%s", env);
     else snprintf(nand_root, sizeof nand_root, "%s/../nand", root);
+    nand_create_defaults(nand_root, mkdirs);
     build_disc_map();
 }

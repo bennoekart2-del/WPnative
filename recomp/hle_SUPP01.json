@@ -4,5 +4,8 @@
  "80138310": "hle_OSLoadContext",
  "80138220": "hle_OSSetCurrentContext",
  "80138880": "hle_OSReport",
- "8018D250": "hle_WUDInit"
+ "8018D250": "hle_WUDInit",
+ "801C8B20": "hle_longjmp",
+ "_setjmp": "801C8A1C",
+ "_comment_setjmp": "setjmp call sites get a host setjmp around them so hle_longjmp can switch the task system's coroutine stacks"
 }

@@ -6,6 +6,7 @@
 #include <stdlib.h>
 
 #include "ppc_context.h"
+#include "rel_module.h"
 
 extern const PPCFuncEntry g_recomp_funcs[];
 extern const unsigned g_recomp_func_count;
@@ -34,6 +35,7 @@ static PPCFunc find_func(uint32_t addr) {
 void ppc_call_indirect(PPCContext* c, uint32_t addr) {
     PPCFunc f = ppc_hle_lookup(addr);
     if (!f) f = find_func(addr);
+    if (!f) f = rel_lookup(addr);
     if (!f) {
         fprintf(stderr, "[cpu] indirect call to unknown address %08X (lr=%08X)\n", addr, c->lr);
         abort();
