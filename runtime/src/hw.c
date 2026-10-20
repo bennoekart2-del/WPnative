@@ -115,6 +115,7 @@ uint32_t mmio_read(uint32_t addr, int size) {
         if (a >= 0x3000 && a < 0x3100) return pi_read(addr);
         if (a >= 0x2000 && a < 0x2100) return hw_vi_read(addr, size);
         if (a >= 0x0000 && a < 0x1000) return gx_cp_read(addr, size);
+        if (a >= 0x1000 && a < 0x2000) return gx_pe_read(addr, size);
         if (a >= 0x5000 && a < 0x5200) return dsp_read(addr, size);
     }
     if ((addr >> 24) == 0xCD && a < 0x40) return ipc_read(addr);
@@ -129,6 +130,7 @@ void mmio_write(uint32_t addr, uint32_t val, int size) {
         if (a >= 0x3000 && a < 0x3100) { pi_write(addr, val); return; }
         if (a >= 0x2000 && a < 0x2100) { hw_vi_write(addr, val, size); return; }
         if (a < 0x1000) { gx_cp_write(addr, val, size); return; }
+        if (a >= 0x1000 && a < 0x2000) { gx_pe_write(addr, val, size); return; }
         if (a >= 0x5000 && a < 0x5200) { dsp_write(addr, val, size); return; }
     }
     if ((addr >> 24) == 0xCD && a < 0x40) { ipc_write(addr, val); return; }

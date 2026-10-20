@@ -91,12 +91,11 @@ int main(int argc, char** argv) {
     for (int frame = 0; platform_pump(); frame++) {
         if (selftest) {
             selftest_frame(test_xfb, 640, 480, frame);
-            platform_present_xfb(test_xfb, 640, 480);
+            platform_present_xfb(test_xfb, 640, 480, 1280);
             continue;
         }
-        gx_flush();
         uint32_t xfb = hw_vi_xfb_addr();
-        platform_present_xfb(xfb ? g_mem + PPC_PHYS(xfb) : NULL, 640, 480);
+        platform_present_xfb(xfb ? g_mem + PPC_PHYS(xfb) : NULL, g_xfb_w & ~1, g_xfb_h, g_xfb_stride);
         if (frame % 300 == 0) {
             const GxStats* s = gx_stats();
             fprintf(stderr, "[stats] draws=%llu verts=%llu efb_copies=%llu xfb=%08X\n",

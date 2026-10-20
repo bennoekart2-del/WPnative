@@ -18,7 +18,7 @@ typedef struct {
 
 int platform_init(const char* title, int width, int height);
 int platform_pump(void);                /* returns 0 when the user closed the window */
-void platform_present_xfb(const uint8_t* yuyv, int width, int height); /* VI external framebuffer */
+void platform_present_xfb(const uint8_t* yuyv, int width, int height, int pitch); /* VI external framebuffer */
 const HostRemote* platform_remote(int player);
 void platform_shutdown(void);
 

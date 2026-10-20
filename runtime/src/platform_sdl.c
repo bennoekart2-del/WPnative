@@ -121,13 +121,13 @@ int platform_pump(void) {
 
 
 /* The VI scans out a YUYV 4:2:2 framebuffer from guest memory. */
-void platform_present_xfb(const uint8_t* yuyv, int width, int height) {
+void platform_present_xfb(const uint8_t* yuyv, int width, int height, int pitch) {
     if (!xfb_tex || xfb_w != width || xfb_h != height) {
         if (xfb_tex) SDL_DestroyTexture(xfb_tex);
         xfb_tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_YUY2, SDL_TEXTUREACCESS_STREAMING, width, height);
         xfb_w = width; xfb_h = height;
     }
-    if (yuyv) SDL_UpdateTexture(xfb_tex, NULL, yuyv, width * 2);
+    if (yuyv) SDL_UpdateTexture(xfb_tex, NULL, yuyv, pitch);
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
     if (yuyv) SDL_RenderTexture(renderer, xfb_tex, NULL, NULL);
