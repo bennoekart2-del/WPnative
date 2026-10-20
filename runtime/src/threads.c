@@ -315,11 +315,15 @@ void irq_clear(uint32_t cause) {
 
 void irq_decrementer(void) { SDL_SetAtomicInt(&dec_fired, 1); g_irq_pending = 1; }
 
+uint32_t gx_pi_fifo_read(uint32_t off);       /* gx_fifo.c */
+void gx_pi_fifo_write(uint32_t off, uint32_t v);
+
 uint32_t pi_read(uint32_t addr) {
     switch (addr & 0xFF) {
     case 0x00: return (uint32_t)SDL_GetAtomicInt(&pi_cause);
     case 0x04: return pi_mask;
     case 0x2C: return 0x20000000; /* PI_FLIPPER_REV: Hollywood */
+    case 0x0C: case 0x10: case 0x14: return gx_pi_fifo_read(addr & 0xFF);
     default: return 0;
     }
 }
@@ -328,6 +332,7 @@ void pi_write(uint32_t addr, uint32_t v) {
     switch (addr & 0xFF) {
     case 0x00: irq_clear(v & 0x3000); break;  /* only reset-switch bits are write-to-clear */
     case 0x04: pi_mask = v; update_pending(); break;
+    case 0x0C: case 0x10: case 0x14: gx_pi_fifo_write(addr & 0xFF, v); break;
     default: break;
     }
 }

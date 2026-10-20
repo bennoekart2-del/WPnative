@@ -331,7 +331,40 @@ void gx_flush(void) {
     while (SDL_GetAtomicInt(&ring_w) != SDL_GetAtomicInt(&ring_r)) SDL_Delay(0);
 }
 
+/* The CPU-side FIFO (PI registers 0C base, 10 end, 14 write pointer, bit 29 = wrapped). The
+ * write-gather pipe feeds the GPU only while the CPU FIFO is linked to it (CP control bit 4);
+ * unlinked, as while GXBeginDisplayList records, the commands land in guest memory at the write
+ * pointer, and GXEndDisplayList measures the list from it. */
+static uint32_t pi_fifo_base, pi_fifo_end, pi_fifo_wptr;
+static uint16_t cp_regs[0x40];
+
+uint32_t gx_pi_fifo_read(uint32_t off) {
+    return off == 0x0C ? pi_fifo_base : off == 0x10 ? pi_fifo_end : pi_fifo_wptr;
+}
+void gx_pi_fifo_write(uint32_t off, uint32_t v) {
+    if (off == 0x0C) pi_fifo_base = v & 0x1FFFFFE0u;
+    else if (off == 0x10) pi_fifo_end = v & 0x1FFFFFE0u;
+    else pi_fifo_wptr = v & 0x1FFFFFE0u;
+}
+
+static int fifo_linked(void) { return (cp_regs[0x02 / 2] & 0x10) || !pi_fifo_base; }
+
+static void pi_fifo_advance(uint32_t n) {
+    uint32_t p = (pi_fifo_wptr & 0x1FFFFFFFu) + n;
+    if (pi_fifo_end && p >= pi_fifo_end + 32) p = pi_fifo_base | 0x20000000u;  /* wrapped */
+    else p |= pi_fifo_wptr & 0x20000000u;
+    pi_fifo_wptr = p;
+}
+
 void gx_fifo_write(uint32_t val, int size) {
+    if (!fifo_linked()) {
+        for (int i = size - 1; i >= 0; i--) {
+            g_mem[pi_fifo_wptr & 0x1FFFFFFFu] = (uint8_t)(val >> (8 * i));
+            pi_fifo_advance(1);
+        }
+        return;
+    }
+    pi_fifo_advance((uint32_t)size);
     if (gpu_sync < 0) {
         gpu_sync = getenv("WPR_GPU_SYNC") != NULL;
         if (!gpu_sync) {
@@ -358,7 +391,6 @@ void irq_clear(uint32_t cause);
 #define PI_CAUSE_PE_TOKEN 0x200u
 #define PI_CAUSE_PE_FINISH 0x400u
 
-static uint16_t cp_regs[0x40];
 static uint16_t pe_isr, pe_token;
 static SDL_SpinLock pe_lock;  /* pe_isr is set by the GPU thread and acknowledged by the CPU */
 

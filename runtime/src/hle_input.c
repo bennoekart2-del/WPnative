@@ -27,19 +27,29 @@ static struct {
 } prev[MAX_PLAYERS];
 static unsigned reads[MAX_PLAYERS];
 
-/* WPR_PRESS="A:300,2:400" holds a button on player 1 for 8 reads starting at a read count
- * (for headless test runs). */
+/* WPR_PRESS="A:300,AB:400,2:500" holds buttons on player 1 for 8 reads starting at a read count
+ * (for headless test runs). Keys: A B 1 2 + - H U D L R. */
+static uint16_t key_bit(char k) {
+    switch (k) {
+    case 'A': return 0x0800; case 'B': return 0x0400; case '1': return 0x0200; case '2': return 0x0100;
+    case '+': return 0x0010; case '-': return 0x1000; case 'H': return 0x8000;
+    case 'U': return 0x0008; case 'D': return 0x0004; case 'L': return 0x0001; case 'R': return 0x0002;
+    default: return 0;
+    }
+}
+
 static uint16_t scripted_buttons(int chan) {
     const char* s = getenv("WPR_PRESS");
     if (!s || chan != 0) return 0;
     uint16_t b = 0;
     unsigned n = reads[0];
     while (*s) {
-        char key = *s;
+        uint16_t keys = 0;
+        while (*s && *s != ':') keys |= key_bit(*s++);
+        if (*s != ':') break;
         char* end;
-        unsigned at = (unsigned)strtoul(s + 2, &end, 10);
-        if (n >= at && n < at + 8)
-            b |= key == 'A' ? 0x0800 : key == 'B' ? 0x0400 : key == '1' ? 0x0200 : key == '2' ? 0x0100 : 0;
+        unsigned at = (unsigned)strtoul(s + 1, &end, 10);
+        if (n >= at && n < at + 8) b |= keys;
         s = end;
         if (*s != ',') break;
         s++;
@@ -64,12 +74,17 @@ void hle_WPADProbe(PPCContext* c) {
 void hle_KPADReadEx(PPCContext* c) {
     int chan = (int32_t)c->r[3];
     uint32_t buf = c->r[4], len = c->r[5], err = c->r[6];
+    static unsigned calls;
+    if (getenv("WPR_TRACE_INPUT") && ++calls % 200 == 0)
+        fprintf(stderr, "[input] call %u chan %d len %u connected %d\n", calls, chan, len, connected(chan));
     if (!connected(chan) || !buf || !len) {
         if (err) mem_w32(err, (uint32_t)WPAD_ERR_NO_CONTROLLER);
         c->r[3] = 0;
         return;
     }
     reads[chan]++;
+    if (chan == 0 && getenv("WPR_TRACE_INPUT") && reads[0] % 200 == 0)
+        fprintf(stderr, "[input] read %u (lr %08X)\n", reads[0], c->lr);
     const HostRemote* r = platform_remote(chan);
     uint16_t hold = r->buttons | scripted_buttons(chan);
     uint16_t old = prev[chan].hold;
