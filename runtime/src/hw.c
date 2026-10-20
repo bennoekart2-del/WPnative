@@ -25,10 +25,30 @@ uint32_t hw_vi_read(uint32_t addr, int size) {
     return vi_regs[r];
 }
 
+void irq_raise(uint32_t cause);
+void irq_clear(uint32_t cause);
+#define PI_CAUSE_VI 0x100u
+
+/* Display interrupts DI0..DI3 at 0x30..0x3C: bit 31 status, bit 28 enable (high halfword view). */
+static void vi_update_irq(void) {
+    int any = 0;
+    for (int i = 0; i < 4; i++) {
+        uint16_t hi = vi_regs[(0x30 + 4 * i) / 2];
+        if ((hi & 0x8000) && (hi & 0x1000)) any = 1;
+    }
+    if (any) irq_raise(PI_CAUSE_VI); else irq_clear(PI_CAUSE_VI);
+}
+
+void vi_retrace(void) {
+    uint16_t* di0 = &vi_regs[0x30 / 2];
+    if (*di0 & 0x1000) { *di0 |= 0x8000; vi_update_irq(); }
+}
+
 void hw_vi_write(uint32_t addr, uint32_t val, int size) {
     uint32_t r = (addr & 0xFF) >> 1;
     if (size == 4) { vi_regs[r] = (uint16_t)(val >> 16); vi_regs[r + 1] = (uint16_t)val; }
     else vi_regs[r] = (uint16_t)val;
+    if ((addr & 0xFF) >= 0x30 && (addr & 0xFF) < 0x40) vi_update_irq();
 }
 
 /* Top field framebuffer address: VI_TFBL at 0x1C (bit 28 = shift by 5). */
@@ -39,13 +59,66 @@ uint32_t hw_vi_xfb_addr(void) {
     return a;
 }
 
+/* Log each unhandled register once so busy-wait loops don't flood the console. */
+static void log_once(const char* what, uint32_t addr, uint32_t val, int size) {
+    static uint32_t seen[512];
+    static int n;
+    for (int i = 0; i < n; i++) if (seen[i] == addr) return;
+    if (n < 512) seen[n++] = addr;
+    fprintf(stderr, "[hw] unhandled %s%d %08X = %08X\n", what, size * 8, addr, val);
+}
+
+/* DSP interface (CC005000): mailboxes + control/status. Bits that hardware clears on its own
+ * (reset, DMA busy, DSP init) read back as done. */
+static uint16_t dsp_regs[0x40];
+static uint32_t dsp_read(uint32_t a, int size) {
+    uint32_t r = (a & 0x7F) >> 1;
+    if (r == 0x0A / 2) return dsp_regs[r] & ~0x0E01u;
+    /* DSP->CPU mailbox: report a mail so the boot-time DSP handshakes complete. Audio (AX)
+     * will be done natively at the AX API level, so the DSP never runs real microcode. */
+    static int mail_valid;
+    if (r == 0x04 / 2) {
+        /* No mail on the first look, then "the DSP answered"; reading the low half acks it. */
+        int v = mail_valid;
+        if (!v) mail_valid = 1;
+        if (size == 4) { mail_valid = 0; return v ? 0x80000000u : 0; }
+        return v ? 0x8000u : 0;
+    }
+    if (r == 0x06 / 2) { mail_valid = 0; return 0; }
+    if (size == 4) return ((uint32_t)dsp_regs[r] << 16) | dsp_regs[r + 1];
+    return dsp_regs[r];
+}
+static void dsp_write(uint32_t a, uint32_t v, int size) {
+    uint32_t r = (a & 0x7F) >> 1;
+    if (size == 4) {
+        dsp_regs[r] = (uint16_t)(v >> 16); dsp_regs[r + 1] = (uint16_t)v;
+        if (r == 0x28 / 2) dsp_regs[0x0A / 2] |= 0x20;
+        return;
+    }
+    if (r == 0x0A / 2) { dsp_regs[r] = (uint16_t)((dsp_regs[r] & ~0xA8u & ~(v & 0xA8u)) | (v & ~0xA8u)); return; }
+    if (r == 0x2A / 2) { dsp_regs[r] = (uint16_t)v; dsp_regs[0x0A / 2] |= 0x20; return; } /* ARAM DMA done at once */
+    dsp_regs[r] = (uint16_t)v;
+}
+
+uint32_t pi_read(uint32_t addr);
+void pi_write(uint32_t addr, uint32_t v);
+extern volatile int g_irq_pending;
+void ppc_check_irq_current(void);
+
+uint32_t ipc_read(uint32_t addr);
+void ipc_write(uint32_t addr, uint32_t v);
+
 uint32_t mmio_read(uint32_t addr, int size) {
     uint32_t a = addr & 0x00FFFFFF;
+    if (g_irq_pending) ppc_check_irq_current();  /* busy-wait loops on registers are safe points */
     if ((addr >> 24) == 0xCC) {
+        if (a >= 0x3000 && a < 0x3100) return pi_read(addr);
         if (a >= 0x2000 && a < 0x2100) return hw_vi_read(addr, size);
         if (a >= 0x0000 && a < 0x1000) return gx_cp_read(addr, size);
+        if (a >= 0x5000 && a < 0x5200) return dsp_read(addr, size);
     }
-    fprintf(stderr, "[hw] unhandled read%d %08X\n", size * 8, addr);
+    if ((addr >> 24) == 0xCD && a < 0x40) return ipc_read(addr);
+    log_once("read", addr, 0, size);
     return 0;
 }
 
@@ -53,8 +126,11 @@ void mmio_write(uint32_t addr, uint32_t val, int size) {
     uint32_t a = addr & 0x00FFFFFF;
     if ((addr >> 24) == 0xCC) {
         if (a >= 0x8000 && a < 0x9000) { gx_fifo_write(val, size); return; }
+        if (a >= 0x3000 && a < 0x3100) { pi_write(addr, val); return; }
         if (a >= 0x2000 && a < 0x2100) { hw_vi_write(addr, val, size); return; }
         if (a < 0x1000) { gx_cp_write(addr, val, size); return; }
+        if (a >= 0x5000 && a < 0x5200) { dsp_write(addr, val, size); return; }
     }
-    fprintf(stderr, "[hw] unhandled write%d %08X = %08X\n", size * 8, addr, val);
+    if ((addr >> 24) == 0xCD && a < 0x40) { ipc_write(addr, val); return; }
+    log_once("write", addr, val, size);
 }

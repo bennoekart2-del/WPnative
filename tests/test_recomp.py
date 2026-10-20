@@ -113,8 +113,13 @@ extern const uint32_t g_recomp_entry;
 uint32_t mmio_read(uint32_t a, int s) { (void)a; (void)s; return 0; }
 void mmio_write(uint32_t a, uint32_t v, int s) { (void)a; (void)v; (void)s; }
 PPCFunc ppc_hle_lookup(uint32_t a) { (void)a; return NULL; }
+uint64_t host_ticks_ns(void) { return 0; }
+volatile int g_irq_pending;
+void ppc_check_irq(PPCContext* c) { (void)c; }
+void dec_write(uint32_t t) { (void)t; }
+uint32_t dec_read(void) { return 0; }
 int main(int argc, char** argv) {
-    g_mem = calloc(1, 0x14000000);
+    g_mem = calloc(1, 0x18040000);
     FILE* f = fopen(argv[1], "rb"); if (fread(g_mem + 0x2000, 1, 0x300, f) != 0x300) return 1; fclose(f);
     static PPCContext c; c.r[1] = 0x80400000;
     ppc_call_indirect(&c, g_recomp_entry);

@@ -54,9 +54,9 @@ class Emitter:
         if link:
             self.called_externally.add(target)
             return f"c->lr = {h(ret_addr)}; {fn(target)}(c);"
-        if start <= target < end and target != start:
-            return f"goto {lbl(target)};"
-        if target == start:
+        if start <= target < end:
+            if target <= self.cur:
+                return f"PPC_SAFEPOINT(c); goto {lbl(target)};"
             return f"goto {lbl(target)};"
         # branch out of the function: tail call
         self.called_externally.add(target)
@@ -64,6 +64,7 @@ class Emitter:
 
     # ---------------------------------------------------------------- main entry
     def emit(self, i: Insn, start: int, end: int) -> list[str]:
+        self.cur = i.addr
         op = i.opcd
         try:
             handler = getattr(self, f"op{op}", None)
@@ -141,12 +142,14 @@ class Emitter:
             return pre + [f"if ({cond}) {body}"]
         if xo == 0:  # mcrf
             return [f"c->cr[{i.crfd}] = c->cr[{i.crfs}];"]
+        if xo == 50:  # rfi: used by the OS to run a routine in real mode, and by exception handlers
+            return ["ppc_rfi(c); return;"]
         if xo == 150:  # isync
             return ["/* isync */"]
-        crops = {257: "a & b", 129: "a & !b", 289: "a == b", 225: "!(a & b)",
-                 33: "!(a | b)", 449: "a | b", 417: "a | !b", 193: "a ^ b"}
+        crops = {257: "{a} & {b}", 129: "{a} & !{b}", 289: "{a} == {b}", 225: "!({a} & {b})",
+                 33: "!({a} | {b})", 449: "{a} | {b}", 417: "{a} | !{b}", 193: "{a} ^ {b}"}
         if xo in crops:
-            expr = crops[xo].replace("a", f"ppc_crbit(c, {i.ra})").replace("b", f"ppc_crbit(c, {i.rb})")
+            expr = crops[xo].format(a=f"ppc_crbit(c, {i.ra})", b=f"ppc_crbit(c, {i.rb})")
             return [f"ppc_set_crbit(c, {i.rd}, ({expr}) & 1);"]
         return None
 
@@ -343,6 +346,10 @@ class Emitter:
             return [f"{RD} = c->msr;"]
         if xo == 146:
             return [f"ppc_mtmsr(c, {RS});"]
+        if xo == 595:  # mfsr
+            return [f"{RD} = 0;"]
+        if xo == 210:  # mtsr
+            return ["/* mtsr */"]
         if xo == 512:  # mcrxr
             return [f"c->cr[{i.crfd}] = (c->xer_so << 3) | (c->xer_ov << 2) | (c->xer_ca << 1); c->xer_so = c->xer_ov = c->xer_ca = 0;"]
         return None

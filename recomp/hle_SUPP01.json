@@ -1,0 +1,8 @@
+{
+ "_comment": "Wii Party (PAL, SUPP01) functions replaced by native code. Addresses verified by reading the code.",
+ "80138290": "hle_OSSaveContext",
+ "80138310": "hle_OSLoadContext",
+ "80138220": "hle_OSSetCurrentContext",
+ "80138880": "hle_OSReport",
+ "8018D250": "hle_WUDInit"
+}

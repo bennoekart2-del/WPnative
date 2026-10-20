@@ -89,14 +89,50 @@ def jump_table_targets(img: Image, start: int, bctr_addr: int) -> list[int]:
     return out
 
 
-def discover_functions(img: Image, entries: list[int]) -> dict[int, int]:
-    """Return {start: end} for every function reachable from `entries` through calls.
+def _ends_block(w: int) -> bool:
+    i = Insn(0, w)
+    return w == 0 or i.is_return() or i.is_bctr() or i.is_uncond_branch() or w == 0x4C000064  # rfi
 
-    Bounds use the usual heuristic: a function ends at the first blr / unconditional branch / bctr
-    that no earlier internal branch jumps past.
+
+def pointer_candidates(img: Image) -> set[int]:
+    """Functions reached only through pointers: callbacks, vtables, real-mode routines.
+
+    Collect text addresses built in code (lis + addi/ori) or stored in data, and keep the ones that
+    sit right after the end of a block, so pointers into the middle of a function (jump tables) don't
+    split it.
+    """
+    cands = set()
+    for lo, hi, data in img.ranges:
+        hi_reg: dict[int, int] = {}
+        for off in range(0, hi - lo, 4):
+            i = Insn(lo + off, struct.unpack_from(">I", data, off)[0])
+            if i.opcd == 15 and i.ra == 0:
+                hi_reg[i.rd] = i.uimm << 16
+            elif i.opcd == 14 and i.ra in hi_reg:
+                cands.add((hi_reg[i.ra] + i.simm) & 0xFFFFFFFF)
+            elif i.opcd == 24 and i.rs in hi_reg:
+                cands.add(hi_reg[i.rs] | i.uimm)
+    for lo, hi, data in img.all:
+        for off in range(0, (hi - lo) & ~3, 4):
+            cands.add(struct.unpack_from(">I", data, off)[0])
+    out = set()
+    for t in cands:
+        if t & 3 or not img.contains(t) or img.word(t) == 0:
+            continue
+        if not img.contains(t - 4) or _ends_block(img.word(t - 4)):
+            out.add(t)
+    return out
+
+
+def discover_functions(img: Image, entries: list[int]) -> dict[int, int]:
+    """Return {start: end} covering all code, with no overlaps.
+
+    Linear sweep over each text section: a function starts where the previous one ended (after
+    zero padding) or at any `bl` target, and ends at the first blr / bctr / unconditional branch
+    that no earlier internal branch jumps past. Tail-call targets that land inside another function
+    become new starts and the sweep is repeated until nothing changes.
     """
     starts = set(e for e in entries if img.contains(e))
-    # Seed with every bl target in the code: cheap and catches most functions.
     for lo, hi, data in img.ranges:
         for off in range(0, hi - lo, 4):
             i = Insn(lo + off, struct.unpack_from(">I", data, off)[0])
@@ -104,35 +140,44 @@ def discover_functions(img: Image, entries: list[int]) -> dict[int, int]:
                 t = i.branch_target()
                 if img.contains(t):
                     starts.add(t)
-    funcs: dict[int, int] = {}
-    work = sorted(starts)
-    while work:
-        s = work.pop()
-        if s in funcs:
-            continue
-        end_limit = img.range_end(s)
-        reach = s
-        a = s
-        while a < end_limit:
-            i = Insn(a, img.word(a))
-            if a != s and a in starts and a > reach:
-                break  # ran into the next known function
-            t = i.branch_target()
-            if t is not None and not i.lk:
-                if s <= t < end_limit and t > reach and (i.is_cond_branch() or t not in starts):
-                    reach = t
-                elif not (s <= t < end_limit) or t in starts:
-                    if img.contains(t) and t not in starts:
-                        starts.add(t)
-                        work.append(t)  # tail-call target
-            if i.is_bctr():
-                for t in jump_table_targets(img, s, a):
-                    reach = max(reach, t)
-            a += 4
-            if a > reach and (i.is_return() or i.is_bctr() or i.is_uncond_branch()):
-                break
-        funcs[s] = a
-    return funcs
+    starts |= pointer_candidates(img)
+    while True:
+        funcs: dict[int, int] = {}
+        for lo, hi, _ in img.ranges:
+            a = lo
+            while a < hi:
+                if img.word(a) == 0:
+                    a += 4
+                    continue
+                s, reach = a, a
+                while a < hi:
+                    if a != s and a in starts:
+                        break
+                    i = Insn(a, img.word(a))
+                    if i.word == 0:
+                        break
+                    t = i.branch_target()
+                    if t is not None and not i.lk:
+                        if s <= t < hi and t not in starts and t > a:
+                            reach = max(reach, t)
+                    if i.is_bctr():
+                        for jt in jump_table_targets(img, s, a):
+                            reach = max(reach, jt)
+                    a += 4
+                    if a > reach and (i.is_return() or i.is_bctr() or i.is_uncond_branch()):
+                        break
+                funcs[s] = a
+        # every branch that leaves its function must land on a function start
+        missing = set()
+        for fs, fe in funcs.items():
+            for a in range(fs, fe, 4):
+                i = Insn(a, img.word(a))
+                t = i.branch_target()
+                if t is not None and not (fs <= t < fe) and t not in funcs and img.contains(t):
+                    missing.add(t)
+        if not missing:
+            return funcs
+        starts |= missing
 
 
 def emit_function(em: Emitter, img: Image, start: int, end: int) -> str:
@@ -157,6 +202,12 @@ def emit_function(em: Emitter, img: Image, start: int, end: int) -> str:
             out.append(f"{lbl(i.addr)}:;")
         for line in em.emit(i, start, end):
             out.append(f"    {line}")
+    last = insns[-1] if insns else None
+    if last is not None and not (last.is_return() or last.is_uncond_branch() or last.word == 0x4C000064
+                                 or (last.is_bctr())):
+        # falls through into the next function (e.g. CodeWarrior's _savegpr_N / _restgpr_N chains)
+        em.called_externally.add(end)
+        out.append(f"    {fn(end)}(c); return;")
     out.append("#undef BCTR_DISPATCH")
     out.append("}")
     return "\n".join(out)
@@ -166,6 +217,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dol", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--hle", help="JSON {\"80138290\": \"hle_OSSaveContext\", ...}: replace these functions")
     ap.add_argument("--chunk", type=int, default=2000, help="functions per generated .c file")
     args = ap.parse_args()
 
@@ -176,6 +228,10 @@ def main() -> int:
     # Any guest address that is also in the table but outside known code would be a stub.
     externals = set()
     em = Emitter(set(funcs))
+    hle = {}
+    if args.hle:
+        with open(args.hle) as f:
+            hle = {int(k, 16): v for k, v in json.load(f).items() if not k.startswith("_")}
     os.makedirs(args.out, exist_ok=True)
 
     items = sorted(funcs.items())
@@ -185,7 +241,10 @@ def main() -> int:
         with open(path, "w") as f:
             f.write('#include "ppc_context.h"\n#include "recomp_funcs.h"\n\n')
             for s, e in items[n:n + args.chunk]:
-                f.write(emit_function(em, img, s, e))
+                if s in hle:
+                    f.write(f"void {hle[s]}(PPCContext* c);\nvoid {fn(s)}(PPCContext* c) {{ {hle[s]}(c); }}")
+                else:
+                    f.write(emit_function(em, img, s, e))
                 f.write("\n\n")
         files.append(path)
     externals = em.called_externally - set(funcs)

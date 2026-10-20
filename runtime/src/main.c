@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "gx.h"
+#include "ios.h"
 #include "ppc_context.h"
 #include "runtime.h"
 
@@ -19,6 +20,8 @@ extern uint64_t g_timebase;
 uint32_t hw_vi_xfb_addr(void);
 
 static PPCContext g_cpu;
+
+uint64_t host_ticks_ns(void) { return SDL_GetTicksNS(); }
 static SDL_AtomicInt g_running;
 
 PPCFunc ppc_hle_lookup(uint32_t addr) {
@@ -26,7 +29,11 @@ PPCFunc ppc_hle_lookup(uint32_t addr) {
     return NULL;
 }
 
+void threads_init_main(PPCContext* cpu);
+void timers_start(void);
+
 static int SDLCALL guest_thread(void* entry) {
+    threads_init_main(&g_cpu);
     g_cpu.r[1] = 0x816FFFF0;   /* initial stack, as the apploader leaves it */
     g_cpu.msr = 0x00002032;
     ppc_call_indirect(&g_cpu, (uint32_t)(uintptr_t)entry);
@@ -69,8 +76,15 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (!boot_load(argv[1], &entry)) return 1;
+        ios_set_disc_root(argv[1]);
         SDL_SetAtomicInt(&g_running, 1);
-        SDL_DetachThread(SDL_CreateThread(guest_thread, "guest", (void*)(uintptr_t)entry));
+        SDL_PropertiesID props = SDL_CreateProperties();
+        SDL_SetPointerProperty(props, SDL_PROP_THREAD_CREATE_ENTRY_FUNCTION_POINTER, (void*)guest_thread);
+        SDL_SetStringProperty(props, SDL_PROP_THREAD_CREATE_NAME_STRING, "guest-main");
+        SDL_SetPointerProperty(props, SDL_PROP_THREAD_CREATE_USERDATA_POINTER, (void*)(uintptr_t)entry);
+        SDL_SetNumberProperty(props, SDL_PROP_THREAD_CREATE_STACKSIZE_NUMBER, 8 << 20);
+        SDL_DetachThread(SDL_CreateThreadWithProperties(props));
+        timers_start();
     }
 
     static uint8_t test_xfb[640 * 480 * 2];
@@ -80,7 +94,6 @@ int main(int argc, char** argv) {
             platform_present_xfb(test_xfb, 640, 480);
             continue;
         }
-        g_timebase += 60750000 / 60;  /* bus clock / 4 per second */
         gx_flush();
         uint32_t xfb = hw_vi_xfb_addr();
         platform_present_xfb(xfb ? g_mem + PPC_PHYS(xfb) : NULL, 640, 480);

@@ -31,13 +31,16 @@ typedef struct { uint32_t addr; PPCFunc fn; } PPCFuncEntry;
  * MEM1 (24 MB, phys 0x00000000) and MEM2 (64 MB, phys 0x10000000) are mapped at
  * 0x80000000/0xC0000000 and 0x90000000/0xD0000000. Masking with 0x1FFFFFFF gives the physical
  * address for all four views. 0xCC/0xCD xxxxxx are hardware registers, routed to the runtime.
+ * Host memory is GUEST_MEM_SIZE bytes.
  */
 extern uint8_t* g_mem;                         /* host base of physical memory */
 uint32_t mmio_read(uint32_t addr, int size);
 void mmio_write(uint32_t addr, uint32_t val, int size);
 
 #define PPC_IS_MMIO(a) (((a) >> 25) == (0xCC000000u >> 25))
-#define PPC_PHYS(a) ((a) & 0x1FFFFFFFu)
+/* 0xE0000000: the 16 KB locked L1 cache scratchpad (LCEnable), kept past MEM2 in host memory. */
+#define PPC_LC_BASE 0x18000000u
+#define PPC_PHYS(a) ((((a) >> 28) == 0xEu) ? PPC_LC_BASE + ((a) & 0x3FFFFu) : ((a) & 0x1FFFFFFFu))
 
 #if defined(_MSC_VER)
 #include <stdlib.h>
@@ -158,6 +161,10 @@ uint32_t ppc_mftb(PPCContext* c, uint32_t spr);
 void ppc_mtmsr(PPCContext* c, uint32_t v);
 void ppc_syscall(PPCContext* c, uint32_t addr);
 void ppc_call_indirect(PPCContext* c, uint32_t addr);
+void ppc_rfi(PPCContext* c);
+void ppc_check_irq(PPCContext* c);
+extern volatile int g_irq_pending;
+#define PPC_SAFEPOINT(c) do { if (g_irq_pending) ppc_check_irq(c); } while (0)
 void ppc_unimpl(PPCContext* c, uint32_t addr, uint32_t word);
 
 #ifdef __cplusplus
