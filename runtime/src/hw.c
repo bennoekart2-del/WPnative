@@ -91,36 +91,46 @@ static void log_once(const char* what, uint32_t addr, uint32_t val, int size) {
     fprintf(stderr, "[hw] unhandled %s%d %08X = %08X\n", what, size * 8, addr, val);
 }
 
-/* DSP interface (CC005000): mailboxes + control/status. Bits that hardware clears on its own
- * (reset, DMA busy, DSP init) read back as done. */
-static uint16_t dsp_regs[0x40];
-static uint32_t dsp_read(uint32_t a, int size) {
-    uint32_t r = (a & 0x7F) >> 1;
-    if (r == 0x0A / 2) return dsp_regs[r] & ~0x0E01u;
-    /* DSP->CPU mailbox: report a mail so the boot-time DSP handshakes complete. Audio (AX)
-     * will be done natively at the AX API level, so the DSP never runs real microcode. */
-    static int mail_valid;
-    if (r == 0x04 / 2) {
-        /* No mail on the first look, then "the DSP answered"; reading the low half acks it. */
-        int v = mail_valid;
-        if (!v) mail_valid = 1;
-        if (size == 4) { mail_valid = 0; return v ? 0x80000000u : 0; }
-        return v ? 0x8000u : 0;
-    }
-    if (r == 0x06 / 2) { mail_valid = 0; return 0; }
-    if (size == 4) return ((uint32_t)dsp_regs[r] << 16) | dsp_regs[r + 1];
-    return dsp_regs[r];
+uint32_t dsp_read(uint32_t a, int size);              /* dsp.c */
+void dsp_write(uint32_t a, uint32_t v, int size);
+
+/* Audio interface (CC006C00, also seen through the CD006C00 mirror). Only the sample counter
+ * matters so far: AIInit times it against the CPU clock, so it advances with host time at the
+ * streaming rate while PSTAT is set (bits per Dolphin's HW/AudioInterface.cpp). */
+#include <SDL3/SDL_timer.h>
+static uint32_t ai_control, ai_volume, ai_count_base, ai_irq_timing;
+static uint64_t ai_start_ns;
+static uint32_t ai_rate(void) { return (ai_control & 2) ? 48000u : 32000u; }
+static uint32_t ai_count(void) {
+    if (!(ai_control & 1)) return ai_count_base;
+    return ai_count_base + (uint32_t)((SDL_GetTicksNS() - ai_start_ns) * ai_rate() / 1000000000ull);
 }
-static void dsp_write(uint32_t a, uint32_t v, int size) {
-    uint32_t r = (a & 0x7F) >> 1;
-    if (size == 4) {
-        dsp_regs[r] = (uint16_t)(v >> 16); dsp_regs[r + 1] = (uint16_t)v;
-        if (r == 0x28 / 2) dsp_regs[0x0A / 2] |= 0x20;
-        return;
+/* AIDFR (bit 6) picks the rate the DSP's DMA output plays at */
+uint32_t hw_ai_dma_rate(void) { return (ai_control & 0x40) ? 32000u : 48000u; }
+
+static uint32_t ai_read(uint32_t a) {
+    switch (a & 0x0F) {
+    case 0x00: return ai_control;
+    case 0x04: return ai_volume;
+    case 0x08: return ai_count();
+    default: return ai_irq_timing;
     }
-    if (r == 0x0A / 2) { dsp_regs[r] = (uint16_t)((dsp_regs[r] & ~0xA8u & ~(v & 0xA8u)) | (v & ~0xA8u)); return; }
-    if (r == 0x2A / 2) { dsp_regs[r] = (uint16_t)v; dsp_regs[0x0A / 2] |= 0x20; return; } /* ARAM DMA done at once */
-    dsp_regs[r] = (uint16_t)v;
+}
+static void ai_write(uint32_t a, uint32_t v) {
+    switch (a & 0x0F) {
+    case 0x00: {
+        uint32_t now = ai_count();
+        if (v & 0x20) now = 0;                       /* SCRESET */
+        if (v & 0x08) ai_control &= ~0x08u;          /* AIINT: write 1 to clear */
+        ai_control = (ai_control & 0x08) | (v & ~0x28u);
+        ai_count_base = now;
+        ai_start_ns = SDL_GetTicksNS();
+        break;
+    }
+    case 0x04: ai_volume = v; break;
+    case 0x08: ai_count_base = v; ai_start_ns = SDL_GetTicksNS(); break;
+    default: ai_irq_timing = v; break;
+    }
 }
 
 uint32_t pi_read(uint32_t addr);
@@ -141,6 +151,7 @@ uint32_t mmio_read(uint32_t addr, int size) {
         if (a >= 0x1000 && a < 0x2000) return gx_pe_read(addr, size);
         if (a >= 0x5000 && a < 0x5200) return dsp_read(addr, size);
     }
+    if (a >= 0x6C00 && a < 0x6C20) return ai_read(a);
     if ((addr >> 24) == 0xCD && a < 0x40) return ipc_read(addr);
     log_once("read", addr, 0, size);
     return 0;
@@ -156,6 +167,7 @@ void mmio_write(uint32_t addr, uint32_t val, int size) {
         if (a >= 0x1000 && a < 0x2000) { gx_pe_write(addr, val, size); return; }
         if (a >= 0x5000 && a < 0x5200) { dsp_write(addr, val, size); return; }
     }
+    if (a >= 0x6C00 && a < 0x6C20) { ai_write(a, val); return; }
     if ((addr >> 24) == 0xCD && a < 0x40) { ipc_write(addr, val); return; }
     log_once("write", addr, val, size);
 }

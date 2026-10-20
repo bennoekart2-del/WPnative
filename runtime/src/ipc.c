@@ -96,7 +96,7 @@ static void reply(uint32_t req, int32_t result) {
     mem_w32(req + 4, (uint32_t)result);
     mem_w32(req + 8, cmd);
     mem_w32(req, IPC_REPLY);
-    ios_enqueue_reply(req);
+    ios_enqueue_reply(req & 0x3FFFFFFFu);  /* IOS hands back the physical address it was given */
 }
 
 static void execute(uint32_t addr) {

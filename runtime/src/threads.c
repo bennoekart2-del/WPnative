@@ -35,6 +35,7 @@ typedef struct {
     int is_coro, cmd;
     void** resume;         /* host setjmp buffer to resume at (cmd == CORO_RESUME) */
     uint32_t entry;        /* guest address to start at (cmd == CORO_START) */
+    uint32_t last_setjmp;  /* guest buffer of this thread's latest setjmp: where it is parked */
     void* top[5];          /* host buffer at the coroutine thread's base, for restarts */
 } GuestThread;
 
@@ -187,7 +188,9 @@ void hle_OSLoadContext(PPCContext* c) {
  *   which host frame the guest buffer belongs to, and the LR/SP the guest saved.
  *   longjmp(buf) to a buffer still holding those LR/SP resumes that frame: directly on the same
  *   host thread, otherwise by waking its thread. A buffer with a rewritten LR/SP starts a new
- *   coroutine at that LR (reusing the thread that last owned the buffer when possible).
+ *   coroutine at that LR. It reuses the thread that last owned the buffer only when that thread is
+ *   parked in this very buffer (the task is being restarted); a thread that merely initialised the
+ *   buffer for a new task is still running its own task.
  *
  * The running guest OS thread's identity (its OSContext) moves along with every switch.
  */
@@ -206,6 +209,7 @@ static JmpSlot* jslot(uint32_t buf, int create) {
 void** wpr_setjmp_begin(PPCContext* c) {
     JmpSlot* s = jslot(c->r[3], 1);
     s->owner = self();
+    s->owner->last_setjmp = c->r[3];
     s->lr = c->lr;
     s->sp = c->r[1];
     return s->jb;
@@ -262,6 +266,7 @@ void hle_longjmp(PPCContext* c) {
     JmpSlot* s = jslot(buf, 0);
     if (s && s->owner && s->lr == lr && s->sp == sp) {
         GuestThread* t = s->owner;
+        TTRACE("[coro] resume buf %08X lr %08X sp %08X: %p -> %p\n", buf, lr, sp, (void*)me, (void*)t);
         if (t == me) {
             jmp_restore(c, buf, v);
             __builtin_longjmp(s->jb, 1);
@@ -272,8 +277,11 @@ void hle_longjmp(PPCContext* c) {
         t->resume = s->jb;
         coro_switch(me, t);
     }
-    GuestThread* t = (s && s->owner && s->owner->is_coro && s->owner != me) ? s->owner : NULL;
+    GuestThread* t = (s && s->owner && s->owner->is_coro && s->owner != me &&
+                      s->owner->last_setjmp == buf) ? s->owner : NULL;
     if (s) s->owner = NULL;
+    if (t)  /* its stack is abandoned: none of its other buffers can be resumed in place */
+        for (int i = 0; i < MAX_JMP; i++) if (jslots[i].owner == t) jslots[i].owner = NULL;
     int fresh = t == NULL;
     if (fresh) {
         t = alloc_thread(0, calloc(1, sizeof(PPCContext)));
@@ -283,7 +291,7 @@ void hle_longjmp(PPCContext* c) {
     jmp_restore(t->cpu, buf, v);
     t->entry = lr;
     t->cmd = CORO_START;
-    TTRACE("[coro] start %08X sp %08X on %s thread\n", lr, sp, fresh ? "new" : "reused");
+    TTRACE("[coro] start buf %08X at %08X sp %08X: %p -> %s %p\n", buf, lr, sp, (void*)me, fresh ? "new" : "reused", (void*)t);
     if (fresh) spawn(coro_main, "coro", 4 << 20, t);
     coro_switch(me, t);
 }
@@ -364,6 +372,7 @@ void ppc_check_irq(PPCContext* c) {
 static SDL_AtomicInt dec_armed;
 static uint64_t dec_deadline_ns;
 void vi_retrace(void);  /* hw.c */
+void dsp_ai_tick(uint64_t now);  /* dsp.c */
 
 void dec_write(uint32_t ticks) {
     dec_deadline_ns = SDL_GetTicksNS() + (uint64_t)ticks * 4000 / 243;
@@ -389,6 +398,7 @@ static int SDLCALL timer_thread(void* arg) {
             next_vi += 1000000000ull / 60;
             vi_retrace();
         }
+        dsp_ai_tick(now);
         SDL_DelayPrecise(250000);
     }
     return 0;

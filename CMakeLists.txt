@@ -14,7 +14,7 @@ FetchContent_Declare(SDL3 GIT_REPOSITORY https://github.com/libsdl-org/SDL.git G
 FetchContent_MakeAvailable(SDL3)
 
 set(RUNTIME_SRC
-    runtime/src/main.c runtime/src/boot.c runtime/src/cpu_services.c runtime/src/hw.c
+    runtime/src/main.c runtime/src/boot.c runtime/src/cpu_services.c runtime/src/hw.c runtime/src/dsp.c
     runtime/src/gx_fifo.c runtime/src/gx_render.c runtime/src/platform_sdl.c runtime/src/threads.c
     runtime/src/ipc.c runtime/src/ios_devices.c runtime/src/hle_input.c runtime/src/rel_link.c runtime/src/nand_defaults.c)
 

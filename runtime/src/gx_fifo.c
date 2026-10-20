@@ -3,10 +3,16 @@
  * handed to the renderer in gx_render.c. Bit layouts follow Dolphin's VideoCommon/CPMemory.h and
  * VertexLoader, and YAGCD chapter 5.
  *
- * Decoding runs on the guest thread that writes the FIFO, so register state, EFB copies and PE
- * interrupts happen in program order, like on hardware.
+ * Decoding runs on its own host thread, the way the GPU runs beside the CPU on hardware (and in
+ * Dolphin's dual-core mode): the guest only appends to a ring buffer and goes on, so time it would
+ * spend rasterizing is left to the game's lower-priority threads (file decompression, for one).
+ * The game synchronises with the GPU the usual way, through PE draw-done and token interrupts,
+ * which the GPU thread raises when it reaches those commands. WPR_GPU_SYNC=1 decodes on the
+ * writing thread instead, for debugging.
  */
+#include <SDL3/SDL.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "gx.h"
@@ -282,16 +288,68 @@ static size_t decode(const uint8_t* buf, size_t len, int depth) {
     return p;
 }
 
-void gx_flush(void) {
+/* ------------------------------------------------------------------ CPU -> GPU ring */
+#define RING_SIZE (1u << 23)
+static uint8_t ring[RING_SIZE];
+static SDL_AtomicInt ring_w, ring_r;  /* free-running byte counters */
+static SDL_Semaphore* gpu_wake;
+static SDL_AtomicInt gpu_sleeping;
+static int gpu_sync = -1;
+
+static void consume(void) {
     size_t used = decode(fifo, fifo_len, 0);
     memmove(fifo, fifo + used, fifo_len - used);
     fifo_len -= used;
 }
 
+static int gpu_main(void* arg) {
+    (void)arg;
+    for (;;) {
+        uint32_t w = (uint32_t)SDL_GetAtomicInt(&ring_w), r = (uint32_t)SDL_GetAtomicInt(&ring_r);
+        if (w == r) {
+            SDL_SetAtomicInt(&gpu_sleeping, 1);
+            if ((uint32_t)SDL_GetAtomicInt(&ring_w) == r) SDL_WaitSemaphoreTimeout(gpu_wake, 2);
+            SDL_SetAtomicInt(&gpu_sleeping, 0);
+            continue;
+        }
+        while (r != w && fifo_len < sizeof fifo) {
+            uint32_t n = w - r, room = (uint32_t)(sizeof fifo - fifo_len), at = r & (RING_SIZE - 1);
+            if (n > room) n = room;
+            if (n > RING_SIZE - at) n = RING_SIZE - at;
+            memcpy(fifo + fifo_len, ring + at, n);
+            fifo_len += n;
+            r += n;
+        }
+        SDL_SetAtomicInt(&ring_r, (int)r);
+        consume();
+    }
+    return 0;
+}
+
+void gx_flush(void) {
+    if (gpu_sync) { consume(); return; }
+    while (SDL_GetAtomicInt(&ring_w) != SDL_GetAtomicInt(&ring_r)) SDL_Delay(0);
+}
+
 void gx_fifo_write(uint32_t val, int size) {
-    if (fifo_len + 4 > sizeof fifo) gx_flush();
-    for (int i = size - 1; i >= 0; i--) fifo[fifo_len++] = (uint8_t)(val >> (8 * i));
-    gx_flush();
+    if (gpu_sync < 0) {
+        gpu_sync = getenv("WPR_GPU_SYNC") != NULL;
+        if (!gpu_sync) {
+            gpu_wake = SDL_CreateSemaphore(0);
+            SDL_CreateThread(gpu_main, "gpu", NULL);
+        }
+    }
+    if (gpu_sync) {
+        if (fifo_len + 4 > sizeof fifo) consume();
+        for (int i = size - 1; i >= 0; i--) fifo[fifo_len++] = (uint8_t)(val >> (8 * i));
+        consume();
+        return;
+    }
+    uint32_t w = (uint32_t)SDL_GetAtomicInt(&ring_w);
+    while (w + (uint32_t)size - (uint32_t)SDL_GetAtomicInt(&ring_r) > RING_SIZE) SDL_Delay(0);  /* GPU behind */
+    for (int i = size - 1; i >= 0; i--) ring[(w++) & (RING_SIZE - 1)] = (uint8_t)(val >> (8 * i));
+    SDL_SetAtomicInt(&ring_w, (int)w);
+    if (SDL_GetAtomicInt(&gpu_sleeping)) SDL_SignalSemaphore(gpu_wake);
 }
 
 /* ------------------------------------------------------------------ CP and PE registers */
@@ -302,6 +360,7 @@ void irq_clear(uint32_t cause);
 
 static uint16_t cp_regs[0x40];
 static uint16_t pe_isr, pe_token;
+static SDL_SpinLock pe_lock;  /* pe_isr is set by the GPU thread and acknowledged by the CPU */
 
 uint32_t gx_cp_read(uint32_t addr, int size) {
     (void)size;
@@ -320,9 +379,11 @@ static void pe_update_irq(void) {
 }
 
 void gx_pe_event(int reg, uint32_t v) {
+    SDL_LockSpinlock(&pe_lock);
     if (reg == 0x45) pe_isr |= 8;
     else { pe_token = (uint16_t)v; if (reg == 0x47) pe_isr |= 4; }
     pe_update_irq();
+    SDL_UnlockSpinlock(&pe_lock);
 }
 
 uint32_t gx_pe_read(uint32_t addr, int size) {
@@ -338,7 +399,9 @@ void gx_pe_write(uint32_t addr, uint32_t val, int size) {
     (void)size;
     if ((addr & 0xFF) == 0x0A) {
         /* bits 0-1 enable, bits 2-3 write 1 to acknowledge */
+        SDL_LockSpinlock(&pe_lock);
         pe_isr = (uint16_t)((pe_isr & 0xC & ~(val & 0xC)) | (val & 3));
         pe_update_irq();
+        SDL_UnlockSpinlock(&pe_lock);
     }
 }
