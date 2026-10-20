@@ -1,0 +1,8 @@
+build/
+gen/
+__pycache__/
+*.iso
+*.wbfs
+*.rvz
+*.dol
+*.rel
