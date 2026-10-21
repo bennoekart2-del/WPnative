@@ -963,8 +963,40 @@ static int render_every(void) {
     return every;
 }
 
+static void triangle(const GxPipeVertex* v0, const GxPipeVertex* v1, const GxPipeVertex* v2);
+
+/* Near-plane clipping. GX clip space has z/w from -1 (near) to 0 (far), so the near plane is
+ * z + w = 0 (with a hair of slack for 2D drawn exactly at the near plane). Big ground polygons usually reach behind the camera; dropping them left floors black. */
+static float near_dist(const GxPipeVertex* v) { return v->clip[2] + v->clip[3] * (1.0f + 1e-4f); }
+
+static void lerp_vertex(const GxPipeVertex* a, const GxPipeVertex* b, float t, GxPipeVertex* o) {
+    for (int k = 0; k < 4; k++) o->clip[k] = a->clip[k] + (b->clip[k] - a->clip[k]) * t;
+    for (int c = 0; c < 2; c++)
+        for (int k = 0; k < 4; k++) o->col[c][k] = a->col[c][k] + (b->col[c][k] - a->col[c][k]) * t;
+    for (int u = 0; u < 8; u++)
+        for (int k = 0; k < 3; k++) o->tc[u][k] = a->tc[u][k] + (b->tc[u][k] - a->tc[u][k]) * t;
+    o->ntex = a->ntex;
+}
+
 void gx_triangle(const GxPipeVertex* v0, const GxPipeVertex* v1, const GxPipeVertex* v2) {
     if (render_every() > 1 && g_xfb_copies % (uint64_t)render_every() != 0) return;
+    const GxPipeVertex* in[3] = {v0, v1, v2};
+    float d[3];
+    int behind = 0;
+    for (int i = 0; i < 3; i++) behind += (d[i] = near_dist(in[i])) < 0;
+    if (behind == 0) { triangle(v0, v1, v2); return; }
+    if (behind == 3) return;
+    GxPipeVertex out[4];
+    int n = 0;
+    for (int i = 0; i < 3; i++) {
+        int j = (i + 1) % 3;
+        if (d[i] >= 0) out[n++] = *in[i];
+        if ((d[i] >= 0) != (d[j] >= 0)) lerp_vertex(in[i], in[j], d[i] / (d[i] - d[j]), &out[n++]);
+    }
+    for (int i = 1; i + 1 < n; i++) triangle(&out[0], &out[i], &out[i + 1]);
+}
+
+static void triangle(const GxPipeVertex* v0, const GxPipeVertex* v1, const GxPipeVertex* v2) {
     if (nworkers < 0) raster_init();
     const GxPipeVertex* v[3] = {v0, v1, v2};
     float sx[3], sy[3], sz[3], iw[3];
