@@ -11,9 +11,11 @@ $ini = Join-Path $dir 'settings.ini'
 # action id (WPR_KEY_<id>), label, default SDL key name
 $actions = @(
     @('UP', 'Up', 'Up'), @('DOWN', 'Down', 'Down'), @('LEFT', 'Left', 'Left'), @('RIGHT', 'Right', 'Right'),
-    @('A', 'A', 'Return'), @('B', 'B', 'Backspace'), @('AB', 'A + B together', 'Tab'),
-    @('1', '1', '1'), @('2', '2', '2'), @('PLUS', '+', '='), @('MINUS', '-', '-'),
-    @('HOME', 'HOME', 'H'), @('SHAKE', 'Shake', 'Right Shift')
+    @('UP2', 'Up (2nd key)', 'W'), @('DOWN2', 'Down (2nd key)', 'S'), @('LEFT2', 'Left (2nd key)', 'A'), @('RIGHT2', 'Right (2nd key)', 'D'),
+    @('A', 'A', 'Return'), @('A2', 'A (2nd key)', 'Space'), @('B', 'B', 'Backspace'), @('1', '1', '1'), @('2', '2', '2'),
+    @('PLUS', '+', '='), @('MINUS', '-', '-'), @('HOME', 'HOME', 'H'), @('SHAKE', 'Shake', 'Left Shift'),
+    @('SWINGUP', 'Swing up', 'T'), @('SWINGDOWN', 'Swing down', 'G'), @('TILTFWD', 'Tilt forward', 'R'),
+    @('TILTBACK', 'Tilt back', 'F'), @('GRIP', 'Upright / sideways', 'Tab')
 )
 
 $cfg = @{ disc = ''; scale = 'Auto'; aspect = '16:9'; fullscreen = '0'; sideways = '0' }
@@ -62,7 +64,7 @@ $form.FormBorderStyle = 'FixedDialog'
 $form.MaximizeBox = $false
 $form.StartPosition = 'CenterScreen'
 $form.Font = New-Object System.Drawing.Font('Segoe UI', 10)
-$form.ClientSize = New-Object System.Drawing.Size(520, 640)
+$form.ClientSize = New-Object System.Drawing.Size(520, 760)
 $form.KeyPreview = $true
 
 function Add-Label($text, $x, $y, $w = 160) {
@@ -109,7 +111,7 @@ $full.Text = 'Start in full screen (F11 switches)'; $full.Location = New-Object 
 $full.Checked = $cfg.fullscreen -eq '1'; $form.Controls.Add($full)
 $y += 30
 $side = New-Object System.Windows.Forms.CheckBox
-$side.Text = 'Start with the Remote held sideways (F1 switches)'; $side.Location = New-Object System.Drawing.Point(180, $y); $side.Size = New-Object System.Drawing.Size(324, 24)
+$side.Text = 'Start with the Remote held sideways (Tab switches)'; $side.Location = New-Object System.Drawing.Point(180, $y); $side.Size = New-Object System.Drawing.Size(324, 24)
 $side.Checked = $cfg.sideways -eq '1'; $form.Controls.Add($side)
 
 $y += 40
@@ -155,7 +157,7 @@ $reset.Add_Click({ foreach ($a in $actions) { $cfg['key_' + $a[0]] = $a[2]; $key
 $form.Controls.Add($reset)
 
 $y += 44
-$note = Add-Label 'Gamepads are players 2-4 (A/B/X/Y, sticks for pointer and tilt). Mouse: pointer, left click A, right click B.' 16 $y 488
+$note = Add-Label 'Gamepads are players 2-4 (A/B/X/Y, sticks for pointer and tilt). Mouse: pointer, left click A, right click B, middle click shake, wheel swings.' 16 $y 488
 $note.Size = New-Object System.Drawing.Size(488, 40)
 
 $y += 50

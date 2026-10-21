@@ -5,29 +5,23 @@ One player per device. The keyboard and mouse are player 1. Every gamepad you pl
 (Xbox, PlayStation, Switch) is the next player: the first is player 2, then 3, then 4.
 A player with no device is treated as a Remote that isn't connected.
 
-Player 1: keyboard and mouse
-  Pointer       Mouse (or the arrow keys once the mouse has been still for 3 seconds)
-  A             Left click, Enter, Space
-  B             Right click, Backspace, Right Ctrl
-  A+B together  Middle click, Tab
-  Up/Down/
-  Left/Right    Arrow keys
-  1 / 2         1 / 2
-  + / -         = / -
-  HOME          H
-  Shake         Right Shift
+Player 1: keyboard and mouse (every key can be changed in the launcher)
+  Pointer                  Mouse (or the arrow keys once the mouse has been still for 3 seconds)
+  A / B                    Left click, Enter or Space / Right click or Backspace
+  1 / 2                    1 / 2
+  + / - / HOME             = (Plus) / Minus / H
+  D-pad                    Arrow keys, W A S D
+  Shake                    Middle click or Left Shift
+  Swing up / down          Mouse wheel, T / G
+  Tilt forward / back      R / F
+  Upright or sideways grip Tab (F1 also works)
 
 Players 2-4: gamepad
   A / Cross = A, B / Circle = B, X = 1, Y = 2, Start = +, Back = -, Guide = HOME,
   D-pad = D-pad, right stick = pointer, left stick = tilt, left shoulder = shake,
   right shoulder = B.
 
-F1   Switches the arrow keys between "pointing at the screen" and "Remote held sideways".
-     Most minigames hold the Remote sideways; press F1 when up/down/left/right feel turned.
-     The title bar shows which mode is on.
-F11  Full screen on/off.
-
-The title bar also shows the frame rate.
+F11  Full screen on/off. The title bar shows the frame rate and the grip.
 
 Launcher: double-click "Wii Party.bat" to pick the disc folder, upscale, screen shape,
 full screen and player 1 keys, then press Play. Settings are kept in settings.ini.

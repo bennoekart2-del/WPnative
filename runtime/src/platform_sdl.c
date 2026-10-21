@@ -129,14 +129,21 @@ static float axis(SDL_Gamepad* g, SDL_GamepadAxis a) {
 
 /* One player per device: the keyboard and mouse are player 1 (mouse pointer, left click A, right
  * click B; the arrow keys also move the pointer and press the D-pad), each gamepad is one more player.
- * F1 turns the arrow keys for a Remote held sideways (as most minigames ask). */
+ * Tab (or F1) turns the direction keys for a Remote held sideways (as most minigames ask). */
 typedef struct {
     SDL_Scancode up, down, left, right, a, b, one, two, plus, minus, home, shake, a2, b2, ab;
+    SDL_Scancode up2, down2, left2, right2, shake2, plus2, minus2;
+    SDL_Scancode grip, swing_up, swing_down, tilt_fwd, tilt_back;
 } KeySet;
 static KeySet p1_keys = {
-    SDL_SCANCODE_UP, SDL_SCANCODE_DOWN, SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT, SDL_SCANCODE_RETURN,
-    SDL_SCANCODE_BACKSPACE, SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_EQUALS, SDL_SCANCODE_MINUS,
-    SDL_SCANCODE_H, SDL_SCANCODE_RSHIFT, SDL_SCANCODE_SPACE, SDL_SCANCODE_RCTRL, SDL_SCANCODE_TAB};
+    .up = SDL_SCANCODE_UP, .down = SDL_SCANCODE_DOWN, .left = SDL_SCANCODE_LEFT, .right = SDL_SCANCODE_RIGHT,
+    .up2 = SDL_SCANCODE_W, .down2 = SDL_SCANCODE_S, .left2 = SDL_SCANCODE_A, .right2 = SDL_SCANCODE_D,
+    .a = SDL_SCANCODE_RETURN, .a2 = SDL_SCANCODE_SPACE, .b = SDL_SCANCODE_BACKSPACE, .b2 = SDL_SCANCODE_RCTRL,
+    .one = SDL_SCANCODE_1, .two = SDL_SCANCODE_2, .plus = SDL_SCANCODE_EQUALS, .plus2 = SDL_SCANCODE_KP_PLUS,
+    .minus = SDL_SCANCODE_MINUS, .minus2 = SDL_SCANCODE_KP_MINUS, .home = SDL_SCANCODE_H,
+    .shake = SDL_SCANCODE_LSHIFT, .shake2 = SDL_SCANCODE_RSHIFT, .grip = SDL_SCANCODE_TAB,
+    .swing_up = SDL_SCANCODE_T, .swing_down = SDL_SCANCODE_G, .tilt_fwd = SDL_SCANCODE_R, .tilt_back = SDL_SCANCODE_F};
+static uint64_t wheel_up_until, wheel_down_until;  /* a mouse-wheel notch swings the Remote for a moment */
 static const KeySet no_keys = {SDL_SCANCODE_UNKNOWN};
 static float key_ptr[MAX_PLAYERS][2];
 static uint64_t mouse_moved_ns, last_poll_ns;
@@ -149,6 +156,10 @@ static void load_key_overrides(void) {
         {"1", offsetof(KeySet, one)}, {"2", offsetof(KeySet, two)}, {"PLUS", offsetof(KeySet, plus)},
         {"MINUS", offsetof(KeySet, minus)}, {"HOME", offsetof(KeySet, home)}, {"SHAKE", offsetof(KeySet, shake)},
         {"A2", offsetof(KeySet, a2)}, {"B2", offsetof(KeySet, b2)}, {"AB", offsetof(KeySet, ab)},
+        {"UP2", offsetof(KeySet, up2)}, {"DOWN2", offsetof(KeySet, down2)}, {"LEFT2", offsetof(KeySet, left2)},
+        {"RIGHT2", offsetof(KeySet, right2)}, {"SHAKE2", offsetof(KeySet, shake2)}, {"GRIP", offsetof(KeySet, grip)},
+        {"SWINGUP", offsetof(KeySet, swing_up)}, {"SWINGDOWN", offsetof(KeySet, swing_down)},
+        {"TILTFWD", offsetof(KeySet, tilt_fwd)}, {"TILTBACK", offsetof(KeySet, tilt_back)},
     };
     for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
         char var[32];
@@ -195,6 +206,18 @@ static void poll_input(void) {
         }
         /* keyboard directions, turned for a sideways Remote (D-pad on the left: screen up = Right) */
         int ku = down(keys, k->up), kd = down(keys, k->down), kl = down(keys, k->left), kr = down(keys, k->right);
+        int wu = down(keys, k->up2), wd = down(keys, k->down2), wl = down(keys, k->left2), wr = down(keys, k->right2);
+        if (sideways) {
+            if (wu) b |= WPAD_RIGHT;
+            if (wd) b |= WPAD_LEFT;
+            if (wl) b |= WPAD_UP;
+            if (wr) b |= WPAD_DOWN;
+        } else {
+            if (wu) b |= WPAD_UP;
+            if (wd) b |= WPAD_DOWN;
+            if (wl) b |= WPAD_LEFT;
+            if (wr) b |= WPAD_RIGHT;
+        }
         if (sideways) {
             if (ku) b |= WPAD_RIGHT;
             if (kd) b |= WPAD_LEFT;
@@ -211,10 +234,16 @@ static void poll_input(void) {
         if (down(keys, k->ab)) b |= WPAD_A | WPAD_B;
         if (down(keys, k->one)) b |= WPAD_1;
         if (down(keys, k->two)) b |= WPAD_2;
-        if (down(keys, k->plus)) b |= WPAD_PLUS;
-        if (down(keys, k->minus)) b |= WPAD_MINUS;
+        if (down(keys, k->plus) || down(keys, k->plus2)) b |= WPAD_PLUS;
+        if (down(keys, k->minus) || down(keys, k->minus2)) b |= WPAD_MINUS;
         if (down(keys, k->home)) b |= WPAD_HOME;
-        if (down(keys, k->shake)) shake = 1;
+        if (down(keys, k->shake) || down(keys, k->shake2)) shake = 1;
+        if (p == 0 && (SDL_GetMouseState(NULL, NULL) & SDL_BUTTON_MMASK)) shake = 1;
+        /* tilt forward / back (R / F), swing up / down (T / G or the mouse wheel) */
+        if (down(keys, k->tilt_fwd)) r->accel[2] += 0.7f;
+        if (down(keys, k->tilt_back)) r->accel[2] -= 0.7f;
+        if (down(keys, k->swing_up) || (p == 0 && now < wheel_up_until)) r->accel[1] += 3.0f;
+        if (down(keys, k->swing_down) || (p == 0 && now < wheel_down_until)) r->accel[1] -= 3.0f;
         if (shake) {  /* a hard back-and-forth swing */
             float ph = (float)(now % 66666667ull) / 66666667.0f;
             r->accel[0] = ph < 0.5f ? 3.0f : -3.0f;
@@ -255,7 +284,6 @@ static void poll_input(void) {
             }
             if (mb & SDL_BUTTON_LMASK) b |= WPAD_A;
             if (mb & SDL_BUTTON_RMASK) b |= WPAD_B;
-            if (mb & SDL_BUTTON_MMASK) b |= WPAD_A | WPAD_B;
         }
         r->buttons = b;
     }
@@ -266,7 +294,7 @@ void platform_set_fps(int fps) {
     static int last;
     if (fps >= 0) last = fps;
     char t[160];
-    SDL_snprintf(t, sizeof t, "Wii Party  |  %d fps  |  %s (F1 to change)  |  F11 full screen", last,
+    SDL_snprintf(t, sizeof t, "Wii Party  |  %d fps  |  %s (Tab to change)  |  F11 full screen", last,
                  sideways ? "Remotes held sideways" : "Remotes pointing at the screen");
     SDL_SetWindowTitle(window, t);
 }
@@ -277,8 +305,12 @@ int platform_pump(void) {
         if (e.type == SDL_EVENT_QUIT) return 0;
         if (e.type == SDL_EVENT_GAMEPAD_ADDED || e.type == SDL_EVENT_GAMEPAD_REMOVED) assign_pads();
         if (e.type == SDL_EVENT_MOUSE_MOTION || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) mouse_moved_ns = SDL_GetTicksNS();
+        if (e.type == SDL_EVENT_MOUSE_WHEEL && e.wheel.y != 0) {
+            uint64_t until = SDL_GetTicksNS() + 150000000ull;
+            if (e.wheel.y > 0) wheel_up_until = until; else wheel_down_until = until;
+        }
         if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) {
-            if (e.key.scancode == SDL_SCANCODE_F1) {
+            if (e.key.scancode == SDL_SCANCODE_F1 || e.key.scancode == p1_keys.grip) {
                 sideways = !sideways;
                 platform_set_fps(-1);
             }
