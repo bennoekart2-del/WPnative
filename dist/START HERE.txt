@@ -1,0 +1,22 @@
+WII PARTY ON YOUR PC - START HERE
+=================================
+
+1. Double-click "Wii Party.bat".
+   (If Windows says "Windows protected your PC": press "More info", then "Run anyway".)
+
+2. On the Play tab, press "Find my game".
+   You need your own Wii Party disc copied to this PC as a folder.
+   No folder yet? Press "I don't have it yet" and follow the steps (done once).
+
+3. Plug in gamepads for players 2, 3 and 4, then press PLAY.
+
+In the game
+  Mouse            point at the screen. Left click = A, right click = B
+  Arrow keys/WASD  the Remote's + pad
+  Left Shift       shake the Remote
+  Q / E, R / F     turn the Remote left/right, tilt it forward/back
+  F1               hold the Remote sideways or upright (most minigames: sideways)
+  F11              full screen on/off
+
+Something wrong? Look at the Help tab in the launcher.
+If the game closes by itself, send the file log.txt from this folder to whoever helps you.
