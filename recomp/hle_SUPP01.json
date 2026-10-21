@@ -17,5 +17,7 @@
  "8017EFB0": "hle_WPADCanSendStreamData",
  "8017F040": "hle_WPADSendStreamData",
  "8017C880": "hle_WPADDisconnect",
+ "80012C90": "wrap:hle_ScreenBrightness",
+ "_comment_wrap": "wrap:name keeps the original as f_X_orig for the native code to call. 80012C90 renders the scene into an I4 texture and stores its average brightness at obj+4 for a screen effect (drawn by 80013010); online that number must not depend on each PC's renderer",
  "_comment_wpad": "WPAD calls that push onto a Remote's command queue (+0x160 head/tail, +0x164 buffer in the control block at 802B62D0[chan]); the queue only exists once the Bluetooth stack runs, so these complete natively. Identified by their queue use, the speaker flag at +0x83C, and their game callers (Mii select at 80067410, Remote speaker sounds at 80077C50-80078DE0)"
 }

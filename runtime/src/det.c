@@ -99,6 +99,37 @@ void det_frame(void) {
                         (unsigned long long)acc, (unsigned long long)(vt / 1000000));
         }
     }
+    const char* watch = getenv("WPR_DET_WATCH");  /* tests: report changes of the word at this physical address */
+    if (watch) {
+        static uint32_t last = 0xDEADBEEF;
+        uint32_t a = (uint32_t)strtoul(watch, NULL, 16), v;
+        memcpy(&v, g_mem + a, 4);
+        if (v != last) fprintf(stderr, "[det] frame %llu: %08X = %08X\n", (unsigned long long)frame, a, __builtin_bswap32(v));
+        last = v;
+    }
+    const char* dump = getenv("WPR_DET_DUMP");  /* tests: "<frame>:<file>" writes MEM1 + MEM2 and the GPU page map */
+    if (dump && strtoull(dump, NULL, 10) == frame && strchr(dump, ':')) {
+        FILE* f = fopen(strchr(dump, ':') + 1, "wb");
+        if (f) {
+            fwrite(g_mem, 1, MEM1_SIZE, f);
+            fwrite(g_mem + MEM2_BASE, 1, MEM2_SIZE, f);
+            fwrite(gpu_page1, 1, sizeof gpu_page1, f);
+            fwrite(gpu_page2, 1, sizeof gpu_page2, f);
+            fclose(f);
+        }
+    }
     if (net_active()) net_frame(frame);
     frame++;
+}
+
+/* 80012C90 renders the scene into a small I4 texture and stores its average brightness (0-15) at
+ * obj+4, which tunes a screen effect. The picture comes from this PC's renderer and picture
+ * quality, so online the number would differ between players and so would everything after it;
+ * there everyone uses the same value instead. */
+void f_80012C90_orig(PPCContext* c);
+void hle_ScreenBrightness(PPCContext* c) {
+    uint32_t obj = c->r[3];
+    f_80012C90_orig(c);
+    if (hash_every) fprintf(stderr, "[det] frame %llu: screen brightness %u\n", (unsigned long long)frame, mem_r32(obj + 4));
+    if (g_det) mem_w32(obj + 4, 1);
 }

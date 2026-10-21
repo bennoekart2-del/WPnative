@@ -256,7 +256,11 @@ def main() -> int:
         with open(path, "w") as f:
             f.write('#include "ppc_context.h"\n#include "recomp_funcs.h"\n\n')
             for s, e in items[n:n + args.chunk]:
-                if s in hle:
+                if s in hle and hle[s].startswith("wrap:"):  # keep the original as f_X_orig; the native code calls it
+                    name = hle[s][5:]
+                    f.write(emit_function(em, img, s, e).replace(f"void {fn(s)}(", f"void {fn(s)}_orig(", 1))
+                    f.write(f"\n\nvoid {name}(PPCContext* c);\nvoid {fn(s)}(PPCContext* c) {{ {name}(c); }}")
+                elif s in hle:
                     f.write(f"void {hle[s]}(PPCContext* c);\nvoid {fn(s)}(PPCContext* c) {{ {hle[s]}(c); }}")
                 else:
                     f.write(emit_function(em, img, s, e))
