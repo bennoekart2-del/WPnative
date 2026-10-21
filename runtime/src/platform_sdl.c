@@ -216,7 +216,7 @@ static void poll_input(void) {
         if (down(keys, k->home)) b |= WPAD_HOME;
         if (down(keys, k->shake)) shake = 1;
         if (shake) {  /* a hard back-and-forth swing */
-            float ph = (float)(now % 125000000ull) / 125000000.0f;
+            float ph = (float)(now % 66666667ull) / 66666667.0f;
             r->accel[0] = ph < 0.5f ? 3.0f : -3.0f;
             r->accel[1] = ph < 0.5f ? -2.5f : 2.5f;
             r->accel[2] = ph < 0.5f ? 2.0f : -1.0f;

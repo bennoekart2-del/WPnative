@@ -24,6 +24,7 @@
 static struct {
     uint16_t hold;
     float pos[2];
+    float acc[3];
 } prev[MAX_PLAYERS];
 static unsigned reads[MAX_PLAYERS];
 
@@ -117,10 +118,14 @@ void hle_KPADReadEx(PPCContext* c) {
     mem_w32(buf + 0x04, hold & ~old);
     mem_w32(buf + 0x08, old & ~hold);
     /* held level and still: gravity along -y; the left stick tilts */
-    mem_wf32(buf + 0x0C, r->accel[0]);
-    mem_wf32(buf + 0x10, -1.0f + r->accel[1]);
-    mem_wf32(buf + 0x14, 0.0f);
-    mem_wf32(buf + 0x18, 1.0f);
+    float ax = r->accel[0], ay = -1.0f + r->accel[1], az = r->accel[2] - 1.0f;
+    float dx = ax - prev[chan].acc[0], dy = ay - prev[chan].acc[1], dz = az - prev[chan].acc[2];
+    mem_wf32(buf + 0x0C, ax);
+    mem_wf32(buf + 0x10, ay);
+    mem_wf32(buf + 0x14, az);
+    mem_wf32(buf + 0x18, sqrtf(ax * ax + ay * ay + az * az));   /* acc_value */
+    mem_wf32(buf + 0x1C, sqrtf(dx * dx + dy * dy + dz * dz));   /* acc_speed: what shake checks read */
+    prev[chan].acc[0] = ax; prev[chan].acc[1] = ay; prev[chan].acc[2] = az;
     mem_wf32(buf + 0x20, px);
     mem_wf32(buf + 0x24, py);
     mem_wf32(buf + 0x28, vx);
