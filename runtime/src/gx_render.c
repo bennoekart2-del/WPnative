@@ -679,7 +679,20 @@ static const RasterState* current_state(void) {
     return &states[cur_state];
 }
 
+/* WPR_RENDER_EVERY=N (testing): draw only every Nth frame, so scripted runs on a machine without a
+ * GPU reach later screens sooner. Frame dumps then hold only the drawn frames. */
+extern uint64_t g_xfb_copies;
+static int render_every(void) {
+    static int every;
+    if (!every) {
+        const char* e = getenv("WPR_RENDER_EVERY");
+        every = e && atoi(e) > 1 ? atoi(e) : 1;
+    }
+    return every;
+}
+
 void gx_triangle(const GxPipeVertex* v0, const GxPipeVertex* v1, const GxPipeVertex* v2) {
+    if (render_every() > 1 && g_xfb_copies % (uint64_t)render_every() != 0) return;
     if (nworkers < 0) raster_init();
     const GxPipeVertex* v[3] = {v0, v1, v2};
     float sx[3], sy[3], sz[3], iw[3];
@@ -753,7 +766,7 @@ static void dump_frame(int x0, int y0, int w, int h) {
     static const char* dir;
     static int checked, n;
     if (!checked) { dir = getenv("WPR_DUMP_FRAMES"); checked = 1; }
-    if (!dir) return;
+    if (!dir || (g_xfb_copies - 1) % (uint64_t)render_every() != 0) return;
     char path[512];
     snprintf(path, sizeof path, "%s/frame_%04d.ppm", dir, n++);
     FILE* f = fopen(path, "wb");

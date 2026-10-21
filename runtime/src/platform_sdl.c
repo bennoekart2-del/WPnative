@@ -4,7 +4,7 @@
  *   A / Cross  -> A          B / Circle -> B        X -> 1        Y -> 2
  *   Start      -> +          Back       -> -        Guide -> Home
  *   D-pad      -> D-pad      Right stick -> pointer  Left stick -> tilt
- * Every player also has a set of keys (see keysets below and controls.txt); player 1 has the mouse.
+ * One player per device: the keyboard and mouse are player 1, each gamepad is the next player (2-4).
  */
 #include <SDL3/SDL.h>
 #include <stdio.h>
@@ -70,8 +70,10 @@ static void assign_pads(void) {
         for (int p = 0; p < MAX_PLAYERS; p++)
             if (pads[p] && SDL_GetGamepadID(pads[p]) == ids[i]) taken = 1;
         if (taken) continue;
-        for (int p = 0; p < MAX_PLAYERS; p++)
-            if (!pads[p]) { pads[p] = SDL_OpenGamepad(ids[i]); break; }
+        /* the keyboard and mouse are player 1, so gamepads fill players 2-4 first */
+        static const int order[MAX_PLAYERS] = {1, 2, 3, 0};
+        for (int j = 0; j < MAX_PLAYERS; j++)
+            if (!pads[order[j]]) { pads[order[j]] = SDL_OpenGamepad(ids[i]); break; }
     }
     SDL_free(ids);
 }
@@ -81,26 +83,17 @@ static float axis(SDL_Gamepad* g, SDL_GamepadAxis a) {
     return (v > -0.15f && v < 0.15f) ? 0.0f : v;
 }
 
-/* Keyboard players. Player 1 also has the mouse as pointer (left click A, right click B); the
- * others move a pointer with their direction keys, which press the D-pad at the same time.
- * F1 turns the direction keys for a Remote held sideways (as most minigames ask). */
+/* One player per device: the keyboard and mouse are player 1 (mouse pointer, left click A, right
+ * click B; the arrow keys also move the pointer and press the D-pad), each gamepad is one more player.
+ * F1 turns the arrow keys for a Remote held sideways (as most minigames ask). */
 typedef struct {
     SDL_Scancode up, down, left, right, a, b, one, two, plus, minus, home, shake, a2, b2, ab;
 } KeySet;
-static const KeySet keysets[MAX_PLAYERS] = {
-    {SDL_SCANCODE_UP, SDL_SCANCODE_DOWN, SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT, SDL_SCANCODE_RETURN,
-     SDL_SCANCODE_BACKSPACE, SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_EQUALS, SDL_SCANCODE_MINUS,
-     SDL_SCANCODE_H, SDL_SCANCODE_RSHIFT, SDL_SCANCODE_SPACE, SDL_SCANCODE_RCTRL, SDL_SCANCODE_TAB},
-    {SDL_SCANCODE_W, SDL_SCANCODE_S, SDL_SCANCODE_A, SDL_SCANCODE_D, SDL_SCANCODE_Q, SDL_SCANCODE_E,
-     SDL_SCANCODE_Z, SDL_SCANCODE_X, SDL_SCANCODE_3, SDL_SCANCODE_UNKNOWN, SDL_SCANCODE_UNKNOWN,
-     SDL_SCANCODE_R, SDL_SCANCODE_UNKNOWN, SDL_SCANCODE_UNKNOWN, SDL_SCANCODE_C},
-    {SDL_SCANCODE_I, SDL_SCANCODE_K, SDL_SCANCODE_J, SDL_SCANCODE_L, SDL_SCANCODE_U, SDL_SCANCODE_O,
-     SDL_SCANCODE_N, SDL_SCANCODE_M, SDL_SCANCODE_8, SDL_SCANCODE_UNKNOWN, SDL_SCANCODE_UNKNOWN,
-     SDL_SCANCODE_P, SDL_SCANCODE_UNKNOWN, SDL_SCANCODE_UNKNOWN, SDL_SCANCODE_COMMA},
-    {SDL_SCANCODE_KP_8, SDL_SCANCODE_KP_5, SDL_SCANCODE_KP_4, SDL_SCANCODE_KP_6, SDL_SCANCODE_KP_7,
-     SDL_SCANCODE_KP_9, SDL_SCANCODE_KP_1, SDL_SCANCODE_KP_3, SDL_SCANCODE_KP_PLUS, SDL_SCANCODE_KP_MINUS,
-     SDL_SCANCODE_UNKNOWN, SDL_SCANCODE_KP_0, SDL_SCANCODE_UNKNOWN, SDL_SCANCODE_UNKNOWN, SDL_SCANCODE_KP_2},
-};
+static const KeySet p1_keys = {
+    SDL_SCANCODE_UP, SDL_SCANCODE_DOWN, SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT, SDL_SCANCODE_RETURN,
+    SDL_SCANCODE_BACKSPACE, SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_EQUALS, SDL_SCANCODE_MINUS,
+    SDL_SCANCODE_H, SDL_SCANCODE_RSHIFT, SDL_SCANCODE_SPACE, SDL_SCANCODE_RCTRL, SDL_SCANCODE_TAB};
+static const KeySet no_keys = {SDL_SCANCODE_UNKNOWN};
 static int sideways;
 static float key_ptr[MAX_PLAYERS][2];
 static uint64_t mouse_moved_ns, last_poll_ns;
@@ -116,10 +109,10 @@ static void poll_input(void) {
     for (int p = 0; p < MAX_PLAYERS; p++) {
         HostRemote* r = &remotes[p];
         SDL_Gamepad* g = pads[p];
-        const KeySet* k = &keysets[p];
+        const KeySet* k = p == 0 ? &p1_keys : &no_keys;
         uint16_t b = 0;
         int shake = 0;
-        r->connected = 1;  /* every player can play on the keyboard */
+        r->connected = p == 0 || g;
         r->accel[0] = r->accel[1] = 0.0f;
         r->accel[2] = 1.0f;
         if (g) {
