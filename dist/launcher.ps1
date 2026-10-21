@@ -410,7 +410,9 @@ function Start-Game([hashtable]$online) {
         Show-Message "The game program (wiiparty-native.exe) isn't in this folder:`r`n$dir`r`n`r`nThis launcher has to be in the same folder as the game program." 'Error'
         return
     }
-    if (Test-Path 'log.txt') { Move-Item -Force 'log.txt' 'log-previous.txt' }
+    # a friend's game started on the same PC (to try online play) writes its own log
+    $log = if ($online -and $online.WPR_NET_JOIN) { 'log-join.txt' } else { 'log.txt' }
+    if (Test-Path $log) { Move-Item -Force $log ($log -replace '\.txt$', '-previous.txt') }
     $env:WPR_ASPECT = $cfg.aspect
     if ($cfg.scale -ne 'Auto') { $env:WPR_SCALE = $cfg.scale } else { Remove-Item Env:WPR_SCALE -ErrorAction SilentlyContinue }
     $env:WPR_FULLSCREEN = $cfg.fullscreen
@@ -420,7 +422,7 @@ function Start-Game([hashtable]$online) {
     if ($online) { foreach ($k in $online.Keys) { Set-Item "Env:$k" $online[$k] } }
     $started = Get-Date
     $proc = Start-Process -FilePath $exe -ArgumentList ('"' + $cfg.disc + '"') -WorkingDirectory $dir `
-        -RedirectStandardError (Join-Path $dir 'log.txt') -NoNewWindow -PassThru
+        -RedirectStandardError (Join-Path $dir $log) -NoNewWindow -PassThru
     $null = $proc.Handle  # keeps the exit code readable after it ends
     $form.WindowState = 'Minimized'
     $proc.WaitForExit()
@@ -430,9 +432,9 @@ function Start-Game([hashtable]$online) {
         return
     }
     if ($proc.ExitCode -ne 0) {
-        Show-Message ("The game stopped unexpectedly.`r`n`r`nPlease send the file log.txt from this folder to the person who helps you:`r`n$dir") 'Error'
+        Show-Message ("The game stopped unexpectedly.`r`n`r`nPlease send the file $log from this folder to the person who helps you:`r`n$dir") 'Error'
     } elseif (((Get-Date) - $started).TotalSeconds -lt 5) {
-        Show-Message ("The game closed right away.`r`n`r`nPlease send the file log.txt from this folder to the person who helps you:`r`n$dir") 'Warning'
+        Show-Message ("The game closed right away.`r`n`r`nPlease send the file $log from this folder to the person who helps you:`r`n$dir") 'Warning'
     }
     $form.Close()
 }

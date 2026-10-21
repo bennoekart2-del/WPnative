@@ -45,7 +45,7 @@ typedef int sock_t;
 #define RING 512
 #define REMOTE_BYTES 24
 
-enum { M_HELLO = 1, M_REJECT, M_PING, M_PONG, M_FILE, M_START, M_INPUT, M_FRAME, M_HASH, M_DESYNC, M_BYE };
+enum { M_HELLO = 1, M_REJECT, M_PING, M_PONG, M_FILE, M_START, M_INPUT, M_FRAME, M_HASH, M_DESYNC, M_BYE, M_DIR };
 
 typedef struct {
     sock_t s;
@@ -435,7 +435,12 @@ static void send_nand(Peer* pe, const char* root) {
         char path[1400];
         snprintf(path, sizeof path, "%s/%s", root, names[i]);
         SDL_PathInfo info;
-        if (!SDL_GetPathInfo(path, &info) || info.type != SDL_PATHTYPE_FILE) continue;
+        if (!SDL_GetPathInfo(path, &info)) continue;
+        if (info.type == SDL_PATHTYPE_DIRECTORY) {  /* empty ones matter too: the game saves through /tmp */
+            send_msg(pe, M_DIR, names[i], (uint32_t)strlen(names[i]));
+            continue;
+        }
+        if (info.type != SDL_PATHTYPE_FILE) continue;
         size_t n = 0;
         void* data = SDL_LoadFile(path, &n);
         if (!data) continue;
@@ -668,6 +673,12 @@ static int join_start(const char* disc_root, const char* where) {
         if (!recv_msg(s, &type, &d, &len)) { fail("The host closed the connection."); return 0; }
         if (type == M_REJECT) { fail((const char*)d); free(d); return 0; }
         if (type == M_PING) send_msg(pe, M_PONG, d, len);
+        if (type == M_DIR && len < 1000 && strlen((char*)d) == len && !strstr((char*)d, "..") && d[0] != '/' &&
+            d[0] != '\\' && !strchr((char*)d, ':')) {
+            char path[2200];
+            snprintf(path, sizeof path, "%s/%s", nand, (char*)d);
+            SDL_CreateDirectory(path);
+        }
         if (type == M_FILE && len >= 2) {
             uint16_t pl;
             memcpy(&pl, d, 2);
