@@ -378,6 +378,7 @@ static SDL_AtomicInt dec_armed;
 static uint64_t dec_deadline_ns;
 void vi_retrace(void);  /* hw.c */
 void dsp_ai_tick(uint64_t now);  /* dsp.c */
+void ipc_tick(uint64_t now);     /* ipc.c */
 
 void dec_write(uint32_t ticks) {
     dec_deadline_ns = SDL_GetTicksNS() + (uint64_t)ticks * 4000 / 243;
@@ -404,6 +405,7 @@ static int SDLCALL timer_thread(void* arg) {
             vi_retrace();
         }
         dsp_ai_tick(now);
+        ipc_tick(now);
         SDL_DelayPrecise(250000);
     }
     return 0;

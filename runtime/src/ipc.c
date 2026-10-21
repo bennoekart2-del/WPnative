@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <SDL3/SDL.h>
+
 #include "ios.h"
 #include "ppc_context.h"
 
@@ -20,6 +22,7 @@ static uint32_t ppc_msg, arm_msg, irq_flags, irq_mask;
 static uint8_t X1, X2, Y1, Y2, IY1, IY2;
 static uint32_t req_q[64], rep_q[64];
 static int req_n, rep_n;
+static SDL_SpinLock ipc_lock;  /* the timer thread delivers deferred replies (ipc_tick) */
 
 static void update_irq(void) {
     if ((Y1 & IY1) || (Y2 & IY2)) irq_flags |= IRQ_IPC_BROADWAY;
@@ -54,18 +57,23 @@ static void update_ipc(void) {
 }
 
 uint32_t ipc_read(uint32_t addr) {
+    uint32_t v;
+    SDL_LockSpinlock(&ipc_lock);
     switch (addr & 0xFF) {
-    case 0x00: return ppc_msg;
-    case 0x04: return (uint32_t)((IY2 << 5) | (IY1 << 4) | (X2 << 3) | (Y1 << 2) | (Y2 << 1) | X1);
-    case 0x08: return arm_msg;
-    case 0x30: return irq_flags;
-    case 0x34: return irq_mask;
-    default: return 0;
+    case 0x00: v = ppc_msg; break;
+    case 0x04: v = (uint32_t)((IY2 << 5) | (IY1 << 4) | (X2 << 3) | (Y1 << 2) | (Y2 << 1) | X1); break;
+    case 0x08: v = arm_msg; break;
+    case 0x30: v = irq_flags; break;
+    case 0x34: v = irq_mask; break;
+    default: v = 0; break;
     }
+    SDL_UnlockSpinlock(&ipc_lock);
+    return v;
 }
 
 void ipc_write(uint32_t addr, uint32_t v) {
     if (getenv("WPR_TRACE_IPC")) fprintf(stderr, "[ipc] write %02X = %08X\n", addr & 0xFF, v);
+    SDL_LockSpinlock(&ipc_lock);
     switch (addr & 0xFF) {
     case 0x00: ppc_msg = v; break;
     case 0x04:
@@ -84,6 +92,7 @@ void ipc_write(uint32_t addr, uint32_t v) {
     }
     update_ipc();
     update_ipc();
+    SDL_UnlockSpinlock(&ipc_lock);
 }
 
 /* ------------------------------------------------------------------ IOS kernel: fd table + dispatch */
@@ -97,6 +106,36 @@ static void reply(uint32_t req, int32_t result) {
     mem_w32(req + 8, cmd);
     mem_w32(req, IPC_REPLY);
     ios_enqueue_reply(req & 0x3FFFFFFFu);  /* IOS hands back the physical address it was given */
+}
+
+/* NAND file opens answer a frame later, like the real flash. The game starts its save thread,
+ * then waits retrace by retrace for the thread's busy flag to go up and then down again; a save
+ * that finishes inside one frame never shows the flag, and the game would wait forever. */
+#define NAND_OPEN_NS 20000000ull
+#define MAX_DEFERRED 16
+static struct { uint32_t req; int32_t res; uint64_t due; } deferred[MAX_DEFERRED];
+static SDL_AtomicInt n_deferred;
+
+static void reply_deferred(uint32_t req, int32_t result) {
+    int n = SDL_GetAtomicInt(&n_deferred);
+    if (n == MAX_DEFERRED) { reply(req, result); return; }
+    deferred[n].req = req;
+    deferred[n].res = result;
+    deferred[n].due = SDL_GetTicksNS() + NAND_OPEN_NS;
+    SDL_SetAtomicInt(&n_deferred, n + 1);
+}
+
+void ipc_tick(uint64_t now) {
+    if (!SDL_GetAtomicInt(&n_deferred) || !SDL_TryLockSpinlock(&ipc_lock)) return;
+    int n = SDL_GetAtomicInt(&n_deferred), kept = 0;
+    for (int i = 0; i < n; i++) {
+        if (now >= deferred[i].due) reply(deferred[i].req, deferred[i].res);
+        else deferred[kept++] = deferred[i];
+    }
+    SDL_SetAtomicInt(&n_deferred, kept);
+    /* hand a waiting reply to the PPC; queued requests are left for the guest's next IPC write */
+    if (!req_n && ready() && rep_n) update_ipc();
+    SDL_UnlockSpinlock(&ipc_lock);
 }
 
 static void execute(uint32_t addr) {
@@ -122,10 +161,13 @@ static void execute(uint32_t addr) {
         void* st = NULL;
         int32_t res = dev->open ? dev->open(path, r.arg[1], &st) : 0;
         fprintf(stderr, "[ios] open %s -> %d\n", path, res < 0 ? res : fd);
-        if (res < 0) { reply(req, res); return; }
-        fd_dev[fd] = dev;
-        fd_state[fd] = st;
-        reply(req, fd);
+        int nand = strncmp(path, "/dev/", 5) != 0;
+        if (res >= 0) {
+            fd_dev[fd] = dev;
+            fd_state[fd] = st;
+            res = fd;
+        }
+        if (nand) reply_deferred(req, res); else reply(req, res);
         return;
     }
     if (r.fd < 0 || r.fd >= MAX_FDS || !fd_dev[r.fd]) { reply(req, -4); return; }
@@ -162,6 +204,8 @@ static void execute(uint32_t addr) {
 }
 
 void ios_reply_later(uint32_t req, int32_t result) {
+    SDL_LockSpinlock(&ipc_lock);
     reply(req, result);
     update_ipc();
+    SDL_UnlockSpinlock(&ipc_lock);
 }
