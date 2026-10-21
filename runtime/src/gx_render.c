@@ -1194,6 +1194,7 @@ void gx_efb_copy(uint32_t trigger) {
         g_xfb_stride = (int)stride;
         g_xfb_last_addr = dst;
         g_xfb_copies++;
+        if (gl) gx_gl_present(x0, y0, w, h);
         dump_frame(x0, y0, w, h);
         /* a game that never invalidates still gets textures it rewrote in memory picked up each frame */
         if (!tcache_game_invalidated) gx_invalidate_textures();

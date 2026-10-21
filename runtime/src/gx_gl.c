@@ -51,7 +51,8 @@
     X(void, glRenderbufferStorage, (GLenum, GLenum, GLsizei, GLsizei)) \
     X(void, glFramebufferRenderbuffer, (GLenum, GLenum, GLenum, GLuint)) \
     X(GLenum, glCheckFramebufferStatus, (GLenum)) X(void, glBindAttribLocation, (GLuint, GLuint, const GLchar*)) \
-    X(void, glBindFragDataLocation, (GLuint, GLuint, const GLchar*))
+    X(void, glBindFragDataLocation, (GLuint, GLuint, const GLchar*)) \
+    X(void, glBlitFramebuffer, (GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum))
 
 #define X(ret, name, args) typedef ret (APIENTRY* PFN_##name) args; static PFN_##name p_##name;
 GL_FUNCS(X)
@@ -238,6 +239,9 @@ static const char* fs_src =
 
 static int gl_state = -1;  /* -1 not tried, 0 unavailable, 1 active */
 static GLuint prog, vao, vbo, fbo, efb_color, efb_depth;
+/* The EFB is drawn at S times its size (sharp on big screens); fbo1 holds a 1x copy for readbacks. */
+static int S = 1;
+static GLuint fbo1, efb1_color;
 static float batch[BATCH_VERTS * VTX_FLOATS];
 static int batch_n;
 static const GxGlState* batch_state;
@@ -314,14 +318,21 @@ static int init_gl(void) {
         p_glVertexAttribPointer((GLuint)(3 + t), 3, GL_FLOAT, GL_FALSE, stride, (void*)(intptr_t)(48 + t * 12));
     }
 
+    S = platform_render_scale();
+    p_glGenTextures(1, &efb1_color);
+    p_glBindTexture(GL_TEXTURE_2D, efb1_color);
+    p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, EFB_W, EFB_H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    p_glGenFramebuffers(1, &fbo1);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, fbo1);
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, efb1_color, 0);
     p_glGenTextures(1, &efb_color);
     p_glBindTexture(GL_TEXTURE_2D, efb_color);
-    p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, EFB_W, EFB_H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, EFB_W * S, EFB_H * S, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     p_glGenRenderbuffers(1, &efb_depth);
     p_glBindRenderbuffer(GL_RENDERBUFFER, efb_depth);
-    p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT32F, EFB_W, EFB_H);
+    p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT32F, EFB_W * S, EFB_H * S);
     p_glGenFramebuffers(1, &fbo);
     p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, efb_color, 0);
@@ -330,7 +341,7 @@ static int init_gl(void) {
         fprintf(stderr, "[gl] EFB framebuffer incomplete\n");
         return 0;
     }
-    p_glViewport(0, 0, EFB_W, EFB_H);
+    p_glViewport(0, 0, EFB_W * S, EFB_H * S);
     p_glClearColor(0, 0, 0, 0);
     p_glClearDepth(0.0);
     p_glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -338,9 +349,11 @@ static int init_gl(void) {
     p_glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     GLenum err = p_glGetError();
     if (err) { fprintf(stderr, "[gl] init error %04X\n", err); return 0; }
-    fprintf(stderr, "[gl] using the GPU renderer\n");
+    fprintf(stderr, "[gl] using the GPU renderer at %dx%d (%dx)\n", EFB_W * S, EFB_H * S, S);
     return 1;
 }
+
+int gx_gl_state(void) { return gl_state; }
 
 int gx_gl_active(void) {
     if (gl_state < 0) gl_state = init_gl();
@@ -484,7 +497,7 @@ void gx_gl_flush(void) {
     p_glBindVertexArray(vao);
     apply_state(batch_state);
     p_glEnable(GL_SCISSOR_TEST);
-    p_glScissor(batch_sc[0], batch_sc[1], batch_sc[2] - batch_sc[0], batch_sc[3] - batch_sc[1]);
+    p_glScissor(batch_sc[0] * S, batch_sc[1] * S, (batch_sc[2] - batch_sc[0]) * S, (batch_sc[3] - batch_sc[1]) * S);
     p_glBindBuffer(GL_ARRAY_BUFFER, vbo);
     p_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)batch_n * VTX_FLOATS * 4, batch, GL_STREAM_DRAW);
     p_glDrawArrays(GL_TRIANGLES, 0, batch_n);
@@ -513,7 +526,16 @@ void gx_gl_read_efb(int x0, int y0, int w, int h, uint8_t (*efb)[EFB_W][4]) {
     if (y0 + h > EFB_H) h = EFB_H - y0;
     if (w <= 0 || h <= 0) return;
     static uint8_t tmp[EFB_W * EFB_H * 4];
-    p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    if (S > 1) {  /* scale the rectangle down to EFB size first */
+        p_glDisable(GL_SCISSOR_TEST);
+        p_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        p_glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+        p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo1);
+        p_glBlitFramebuffer(x0 * S, y0 * S, (x0 + w) * S, (y0 + h) * S, x0, y0, x0 + w, y0 + h, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        p_glBindFramebuffer(GL_FRAMEBUFFER, fbo1);
+    } else {
+        p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    }
     p_glReadPixels(x0, y0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
     for (int y = 0; y < h; y++) memcpy(efb[y0 + y][x0], tmp + (size_t)y * w * 4, (size_t)w * 4);
 }
@@ -522,10 +544,36 @@ void gx_gl_clear(int x0, int y0, int w, int h, const uint8_t rgba[4], float z) {
     gx_gl_flush();
     p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     p_glEnable(GL_SCISSOR_TEST);
-    p_glScissor(x0, y0, w, h);
+    p_glScissor(x0 * S, y0 * S, w * S, h * S);
     p_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     p_glDepthMask(GL_TRUE);
     p_glClearColor(rgba[0] / 255.0f, rgba[1] / 255.0f, rgba[2] / 255.0f, rgba[3] / 255.0f);
     p_glClearDepth((double)z);
     p_glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+}
+
+/* Show an XFB copy straight from the (scaled) EFB: the window gets the full resolution instead of
+ * the 640-wide frame the game writes to memory. The picture fills the window at the TV aspect ratio
+ * (16:9 when the console is set to widescreen), centred, flipped from EFB row order. */
+void gx_gl_present(int x0, int y0, int w, int h) {
+    if (gl_state != 1) return;
+    gx_gl_flush();
+    int ww, wh;
+    if (!platform_gl_window_size(&ww, &wh) || ww <= 0 || wh <= 0) return;
+    float aspect = platform_widescreen() ? 16.0f / 9.0f : 4.0f / 3.0f;
+    int dw = ww, dh = (int)(ww / aspect + 0.5f);
+    if (dh > wh) { dh = wh; dw = (int)(wh * aspect + 0.5f); }
+    int dx = (ww - dw) / 2, dy = (wh - dh) / 2;
+    platform_set_view(dx, dy, dw, dh);
+    p_glDisable(GL_SCISSOR_TEST);
+    p_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    p_glClearColor(0, 0, 0, 1);
+    p_glClear(GL_COLOR_BUFFER_BIT);
+    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+    p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    p_glBlitFramebuffer(x0 * S, y0 * S, (x0 + w) * S, (y0 + h) * S, dx, wh - dy, dx + dw, wh - dy - dh,
+                        GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    platform_gl_swap();
+    p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
 }

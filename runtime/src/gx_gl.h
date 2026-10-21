@@ -36,10 +36,19 @@ typedef struct {
 
 int platform_gl_make_current(void);    /* platform_sdl.c: binds the renderer's GL context to this thread */
 
+int gx_gl_state(void);                  /* -1 not started yet, 0 unavailable, 1 drawing */
 int gx_gl_active(void);                 /* initializes on first use; 0 = use the software renderer */
 void gx_gl_triangle(const GxGlState* s, const int scissor[4], const float pos[3][4], const float col[3][2][4],
                     const float tc[3][8][3]);
 void gx_gl_flush(void);
 void gx_gl_forget_texture(const void* px);
 void gx_gl_read_efb(int x0, int y0, int w, int h, uint8_t (*efb)[640][4]);
+void gx_gl_present(int x0, int y0, int w, int h);  /* shows an XFB copy in the window */
+
+/* platform_sdl.c */
+int platform_render_scale(void);
+int platform_widescreen(void);
+int platform_gl_window_size(int* w, int* h);
+void platform_set_view(int x, int y, int w, int h);
+void platform_gl_swap(void);
 void gx_gl_clear(int x0, int y0, int w, int h, const uint8_t rgba[4], float z);

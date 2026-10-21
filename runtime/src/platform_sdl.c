@@ -27,11 +27,39 @@ static SDL_Texture* xfb_tex;
 static int xfb_w, xfb_h;
 static SDL_Gamepad* pads[MAX_PLAYERS];
 static HostRemote remotes[MAX_PLAYERS];
-static SDL_Window* gl_window;
-static SDL_GLContext gl_context;
+static SDL_GLContext gl_context;  /* with OpenGL the GX renderer draws into the window itself */
+static SDL_AtomicInt view[4];      /* where the picture sits in the window, in pixels */
 
 int platform_gl_make_current(void) {
-    return gl_context && SDL_GL_MakeCurrent(gl_window, gl_context);
+    if (!gl_context || !SDL_GL_MakeCurrent(window, gl_context)) return 0;
+    if (!SDL_GL_SetSwapInterval(-1)) SDL_GL_SetSwapInterval(1);
+    return 1;
+}
+
+int platform_gl_window_size(int* w, int* h) { return SDL_GetWindowSizeInPixels(window, w, h); }
+void platform_gl_swap(void) { SDL_GL_SwapWindow(window); }
+
+void platform_set_view(int x, int y, int w, int h) {
+    SDL_SetAtomicInt(&view[0], x); SDL_SetAtomicInt(&view[1], y);
+    SDL_SetAtomicInt(&view[2], w); SDL_SetAtomicInt(&view[3], h);
+}
+
+/* 16:9 unless WPR_ASPECT=4:3; the console's aspect setting (nand_defaults.c) follows the same choice */
+int platform_widescreen(void) {
+    const char* a = getenv("WPR_ASPECT");
+    return !(a && strcmp(a, "4:3") == 0);
+}
+
+/* How many times 640x528 the GPU draws: enough for the screen's height (1080p -> 3, 1440p -> 3,
+ * 4K -> 5). WPR_SCALE=n overrides. */
+int platform_render_scale(void) {
+    const char* e = getenv("WPR_SCALE");
+    int s = e ? atoi(e) : 0;
+    if (s <= 0) {
+        const SDL_DisplayMode* m = SDL_GetDesktopDisplayMode(SDL_GetDisplayForWindow(window));
+        s = m ? (m->h + 479) / 480 : 2;
+    }
+    return s < 1 ? 1 : s > 6 ? 6 : s;
 }
 
 int platform_init(const char* title, int width, int height) {
@@ -39,23 +67,32 @@ int platform_init(const char* title, int width, int height) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
         return 0;
     }
-    if (!SDL_CreateWindowAndRenderer(title, width, height, SDL_WINDOW_RESIZABLE, &window, &renderer)) {
-        SDL_Log("window failed: %s", SDL_GetError());
-        return 0;
-    }
-    SDL_SetRenderVSync(renderer, 1);
-    platform_set_fps(0);
-    /* the GX renderer's GL context lives on the GPU thread; it draws offscreen, so its window stays hidden */
+    if (platform_widescreen()) width = height * 16 / 9;
+    /* the GX renderer's GL context lives on the GPU thread and presents into this window itself */
     if (!getenv("WPR_RENDERER") || strcmp(getenv("WPR_RENDERER"), "soft") != 0) {
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-        gl_window = SDL_CreateWindow("gx", 64, 64, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
-        if (gl_window) gl_context = SDL_GL_CreateContext(gl_window);
-        if (gl_context) SDL_GL_MakeCurrent(gl_window, NULL);
-        else SDL_Log("no OpenGL 3.3 (%s): using the software renderer", SDL_GetError());
+        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+        window = SDL_CreateWindow(title, width, height, SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL);
+        if (window) gl_context = SDL_GL_CreateContext(window);
+        if (gl_context) SDL_GL_MakeCurrent(window, NULL);
+        else {
+            SDL_Log("no OpenGL 3.3 (%s): using the software renderer", SDL_GetError());
+            if (window) SDL_DestroyWindow(window);
+            window = NULL;
+        }
     }
-    SDL_SetRenderLogicalPresentation(renderer, 640, 480, SDL_LOGICAL_PRESENTATION_LETTERBOX);
+    if (!gl_context && !SDL_CreateWindowAndRenderer(title, width, height, SDL_WINDOW_RESIZABLE, &window, &renderer)) {
+        SDL_Log("window failed: %s", SDL_GetError());
+        return 0;
+    }
+    if (renderer) {
+        SDL_SetRenderVSync(renderer, 1);
+        SDL_SetRenderLogicalPresentation(renderer, platform_widescreen() ? 848 : 640, 480,
+                                         SDL_LOGICAL_PRESENTATION_LETTERBOX);
+    }
+    platform_set_fps(0);
     return 1;
 }
 
@@ -181,10 +218,14 @@ static void poll_input(void) {
         if (p == 0) {
             float mx, my;
             SDL_MouseButtonFlags mb = SDL_GetMouseState(&mx, &my);
-            if (mouse_active) {
+            if (mouse_active && renderer) {
                 SDL_RenderCoordinatesFromWindow(renderer, mx, my, &mx, &my);
-                r->ir_x = kp[0] = mx / 640.0f * 2 - 1;
+                r->ir_x = kp[0] = mx / (platform_widescreen() ? 848.0f : 640.0f) * 2 - 1;
                 r->ir_y = kp[1] = my / 480.0f * 2 - 1;
+            } else if (mouse_active && SDL_GetAtomicInt(&view[2]) > 0) {
+                float d = SDL_GetWindowPixelDensity(window);
+                r->ir_x = kp[0] = (mx * d - (float)SDL_GetAtomicInt(&view[0])) / (float)SDL_GetAtomicInt(&view[2]) * 2 - 1;
+                r->ir_y = kp[1] = (my * d - (float)SDL_GetAtomicInt(&view[1])) / (float)SDL_GetAtomicInt(&view[3]) * 2 - 1;
             }
             if (mb & SDL_BUTTON_LMASK) b |= WPAD_A;
             if (mb & SDL_BUTTON_RMASK) b |= WPAD_B;
@@ -226,6 +267,14 @@ int platform_pump(void) {
 
 /* The VI scans out a YUYV 4:2:2 framebuffer from guest memory. */
 void platform_present_xfb(const uint8_t* yuyv, int width, int height, int pitch) {
+    if (!renderer) {
+        if (gx_gl_state() != 0) { SDL_Delay(2); return; }  /* the GPU thread presents (gx_gl_present) */
+        /* the GPU renderer could not start after all: present the software renderer's frames */
+        renderer = SDL_CreateRenderer(window, NULL);
+        if (!renderer) { SDL_Delay(2); return; }
+        SDL_SetRenderVSync(renderer, 1);
+        SDL_SetRenderLogicalPresentation(renderer, platform_widescreen() ? 848 : 640, 480, SDL_LOGICAL_PRESENTATION_LETTERBOX);
+    }
     if (!xfb_tex || xfb_w != width || xfb_h != height) {
         if (xfb_tex) SDL_DestroyTexture(xfb_tex);
         xfb_tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_YUY2, SDL_TEXTUREACCESS_STREAMING, width, height);
@@ -245,7 +294,7 @@ const HostRemote* platform_remote(int player) { return &remotes[player]; }
  * goes, then the process ends. Saves are already on disk, NAND writes are synchronous. */
 void platform_shutdown(void) {
     for (int p = 0; p < MAX_PLAYERS; p++) if (pads[p]) SDL_CloseGamepad(pads[p]);
-    SDL_DestroyRenderer(renderer);
+    if (renderer) SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     fflush(stdout);
     fflush(stderr);

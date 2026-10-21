@@ -83,6 +83,26 @@ static int write_setting_txt(const char* path) {
 
 static int exists(const char* p) { FILE* f = fopen(p, "rb"); if (f) fclose(f); return f != NULL; }
 
+/* The console's TV aspect setting (IPL.AR: 0 = 4:3, 1 = 16:9) follows WPR_ASPECT, 16:9 by default,
+ * also in a SYSCONF made by an older build. */
+static void set_aspect(const char* path) {
+    const char* want = getenv("WPR_ASPECT");
+    uint8_t ar = want && strcmp(want, "4:3") == 0 ? 0 : 1;
+    static uint8_t buf[0x4000];
+    FILE* f = fopen(path, "rb");
+    if (!f) return;
+    size_t n = fread(buf, 1, sizeof buf, f);
+    fclose(f);
+    for (size_t i = 1; i + 7 < n; i++)
+        if (memcmp(buf + i, "IPL.AR", 6) == 0 && buf[i - 1] == (BYTE << 5 | 5)) {
+            if (buf[i + 6] == ar) return;
+            buf[i + 6] = ar;
+            f = fopen(path, "wb");
+            if (f) { fwrite(buf, 1, n, f); fclose(f); }
+            return;
+        }
+}
+
 void nand_create_defaults(const char* root, void (*mkdirs)(const char*)) {
     static const struct { const char* code; int lang, country; } langs[] = {
         {"en", 1, 110}, {"de", 2, 78}, {"fr", 3, 77}, {"es", 4, 105}, {"it", 5, 83}, {"nl", 6, 94},
@@ -94,6 +114,7 @@ void nand_create_defaults(const char* root, void (*mkdirs)(const char*)) {
     char p[1200];
     snprintf(p, sizeof p, "%s/shared2/sys/SYSCONF", root);
     if (!exists(p)) { mkdirs(p); if (write_sysconf(p, lang, country)) fprintf(stderr, "[nand] created %s\n", p); }
+    set_aspect(p);
     snprintf(p, sizeof p, "%s/title/00000001/00000002/data/setting.txt", root);
     if (!exists(p)) { mkdirs(p); if (write_setting_txt(p)) fprintf(stderr, "[nand] created %s\n", p); }
 }
