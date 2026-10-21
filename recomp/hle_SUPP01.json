@@ -10,5 +10,12 @@
  "_comment_setjmp": "setjmp call sites get a host setjmp around them so hle_longjmp can switch the task system's coroutine stacks",
  "8017C9E0": "hle_WPADProbe",
  "801934E0": "hle_KPADReadEx",
- "_comment_input": "WPADProbe (8017C9E0) and KPADReadEx (801934E0, KPADRead tail-calls it) identified by their callers: KPADInitEx at 80193D00 registers WPAD's sampling/connect callbacks next to the 'Overwritten the callback needed by KPAD' warning; the game polls both per Remote at 80066450 with 16 x 0xF0-byte KPADStatus"
+ "_comment_input": "WPADProbe (8017C9E0) and KPADReadEx (801934E0, KPADRead tail-calls it) identified by their callers: KPADInitEx at 80193D00 registers WPAD's sampling/connect callbacks next to the 'Overwritten the callback needed by KPAD' warning; the game polls both per Remote at 80066450 with 16 x 0xF0-byte KPADStatus",
+ "8017CD60": "hle_WPADGetInfoAsync",
+ "8017D790": "hle_WPADIsSpeakerEnabled",
+ "8017D7E0": "hle_WPADControlSpeaker",
+ "8017EFB0": "hle_WPADCanSendStreamData",
+ "8017F040": "hle_WPADSendStreamData",
+ "8017C880": "hle_WPADDisconnect",
+ "_comment_wpad": "WPAD calls that push onto a Remote's command queue (+0x160 head/tail, +0x164 buffer in the control block at 802B62D0[chan]); the queue only exists once the Bluetooth stack runs, so these complete natively. Identified by their queue use, the speaker flag at +0x83C, and their game callers (Mii select at 80067410, Remote speaker sounds at 80077C50-80078DE0)"
 }

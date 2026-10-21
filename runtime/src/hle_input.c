@@ -144,3 +144,67 @@ void hle_KPADReadEx(PPCContext* c) {
 void hle_WUDInit(PPCContext* c) {
     c->r[3] = 0;
 }
+
+/* The Bluetooth stack never runs, so WPAD's per-Remote command queues are never set up and any
+ * WPAD call that queues a command would write through a null queue. The game only uses the ones
+ * below; each finishes at once, reporting success to its callback the way a real Remote would. */
+static int speaker_on[MAX_PLAYERS];
+
+static void call_wpad_callback(PPCContext* c, uint32_t cb, int chan, int result) {
+    if (!cb) return;
+    c->r[3] = (uint32_t)chan;
+    c->r[4] = (uint32_t)result;
+    ppc_call_indirect(c, cb);
+}
+
+/* s32 WPADGetInfoAsync(s32 chan, WPADInfo* info, WPADCallback cb) */
+void hle_WPADGetInfoAsync(PPCContext* c) {
+    int chan = (int32_t)c->r[3];
+    uint32_t info = c->r[4], cb = c->r[5];
+    if (!connected(chan)) { c->r[3] = (uint32_t)WPAD_ERR_NO_CONTROLLER; return; }
+    if (info) {
+        mem_w32(info + 0x00, 1);              /* dpd (pointer camera) on */
+        mem_w32(info + 0x04, (uint32_t)speaker_on[chan]);
+        mem_w32(info + 0x08, 0);              /* nothing attached */
+        mem_w32(info + 0x0C, 0);              /* battery not low */
+        mem_w32(info + 0x10, 0);
+        mem_w8(info + 0x14, 4);               /* battery level: full */
+        mem_w8(info + 0x15, (uint8_t)(1 << chan));  /* player LED */
+        mem_w8(info + 0x16, 0);
+        mem_w8(info + 0x17, 0);
+    }
+    call_wpad_callback(c, cb, chan, WPAD_ERR_NONE);
+    c->r[3] = WPAD_ERR_NONE;
+}
+
+/* BOOL WPADIsSpeakerEnabled(s32 chan) */
+void hle_WPADIsSpeakerEnabled(PPCContext* c) {
+    int chan = (int32_t)c->r[3];
+    c->r[3] = (uint32_t)(chan >= 0 && chan < MAX_PLAYERS && speaker_on[chan]);
+}
+
+/* s32 WPADControlSpeaker(s32 chan, u32 command, WPADCallback cb): command 0 switches it off */
+void hle_WPADControlSpeaker(PPCContext* c) {
+    int chan = (int32_t)c->r[3];
+    uint32_t cmd = c->r[4], cb = c->r[5];
+    if (!connected(chan)) { c->r[3] = (uint32_t)WPAD_ERR_NO_CONTROLLER; return; }
+    int was = speaker_on[chan];
+    speaker_on[chan] = cmd != 0;
+    if (cmd != 0 || was) call_wpad_callback(c, cb, chan, WPAD_ERR_NONE);
+    c->r[3] = WPAD_ERR_NONE;
+}
+
+/* BOOL WPADCanSendStreamData(s32 chan) */
+void hle_WPADCanSendStreamData(PPCContext* c) {
+    c->r[3] = (uint32_t)connected((int32_t)c->r[3]);
+}
+
+/* s32 WPADSendStreamData(s32 chan, void* buf, u32 len): Remote speaker audio, which is dropped */
+void hle_WPADSendStreamData(PPCContext* c) {
+    c->r[3] = connected((int32_t)c->r[3]) ? WPAD_ERR_NONE : (uint32_t)WPAD_ERR_NO_CONTROLLER;
+}
+
+/* void WPADDisconnect(s32 chan): keyboard and pad players stay connected */
+void hle_WPADDisconnect(PPCContext* c) {
+    (void)c;
+}
