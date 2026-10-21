@@ -37,6 +37,7 @@ typedef struct {
     uint32_t entry;        /* guest address to start at (cmd == CORO_START) */
     uint32_t last_setjmp;  /* guest buffer of this thread's latest setjmp: where it is parked */
     void* top[5];          /* host buffer at the coroutine thread's base, for restarts */
+    int dead;              /* its guest thread ran OSExitThread: it never runs again */
 } GuestThread;
 
 enum { CORO_NONE, CORO_RESUME, CORO_START };
@@ -132,6 +133,7 @@ static int SDLCALL guest_entry(void* arg) {
     ppc_call_indirect(c, entry);
     /* thread function returned: the OS set LR to OSExitThread for exactly this */
     c->lr = exit_fn;
+    t->dead = 1;
     ppc_call_indirect(c, exit_fn);
     fprintf(stderr, "[thread] guest thread %08X fell off OSExitThread\n", t->ctx);
     for (;;) SDL_WaitSemaphore(t->run);
@@ -168,6 +170,15 @@ void hle_OSLoadContext(PPCContext* c) {
     TTRACE("[thread] load %08X (self %08X lr %08X)\n", ctx, me->ctx, c->lr);
     if (me->ctx == ctx || me->irq_ctx == ctx) return;
     GuestThread* t = find_thread(ctx);
+    if (t && t->dead) {
+        /* a new thread was created in the OSContext of one that exited: the old host thread stays
+         * parked inside OSExitThread for good, and the new thread starts on a host thread of its own */
+        SDL_LockMutex(table_lock);
+        t->ctx = 0;
+        t->used = 0;
+        SDL_UnlockMutex(table_lock);
+        t = NULL;
+    }
     if (!t) {
         PPCContext* nc = calloc(1, sizeof *nc);
         ctx_load(nc, ctx);
