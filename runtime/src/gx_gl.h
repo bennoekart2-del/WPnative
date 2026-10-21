@@ -3,7 +3,8 @@
 #include <stdint.h>
 
 /* One bound texture map, decoded to RGBA8 (r in the low byte) with rows `stride` texels apart. */
-typedef struct { uint32_t* px; int w, h, stride; int wrap_s, wrap_t, linear; } GxGlTexMap;
+typedef struct { uint32_t* px; int w, h, stride; int wrap_s, wrap_t, linear; unsigned hires; } GxGlTexMap;
+/* hires: a GPU texture to sample instead of px (an EFB copy kept at the render scale), or 0 */
 
 /* Everything a draw's pixels depend on, resolved from the BP registers once per state change. */
 typedef struct {
@@ -37,7 +38,12 @@ typedef struct {
 int platform_gl_make_current(void);    /* platform_sdl.c: binds the renderer's GL context to this thread */
 
 int gx_gl_state(void);                  /* -1 not started yet, 0 unavailable, 1 drawing */
-int gx_gl_active(void);                 /* initializes on first use; 0 = use the software renderer */
+int gx_gl_active(void);
+/* Copies an EFB rectangle into a new texture at the render scale, converted to what the game's texture
+ * format would decode to: each output channel takes source channel sel[i] (0..3 = r, g, b, a, 4 = intensity
+ * (Y, or r when !intensity), 5 = one). half = box-filtered to half size. Returns the texture, 0 on failure. */
+unsigned gx_gl_copy_texture(int x0, int y0, int w, int h, int half, int intensity, const int sel[4]);
+void gx_gl_delete_texture(unsigned id);                 /* initializes on first use; 0 = use the software renderer */
 void gx_gl_triangle(const GxGlState* s, const int scissor[4], const float pos[3][4], const float col[3][2][4],
                     const float tc[3][8][3]);
 void gx_gl_flush(void);

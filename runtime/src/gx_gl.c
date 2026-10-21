@@ -44,6 +44,7 @@
     X(void, glGetProgramiv, (GLuint, GLenum, GLint*)) X(void, glGetProgramInfoLog, (GLuint, GLsizei, GLsizei*, GLchar*)) \
     X(void, glUseProgram, (GLuint)) X(GLint, glGetUniformLocation, (GLuint, const GLchar*)) \
     X(void, glUniform1i, (GLint, GLint)) X(void, glUniform1iv, (GLint, GLsizei, const GLint*)) \
+    X(void, glUniform4f, (GLint, GLfloat, GLfloat, GLfloat, GLfloat)) X(void, glUniform4i, (GLint, GLint, GLint, GLint, GLint)) \
     X(void, glUniform4iv, (GLint, GLsizei, const GLint*)) \
     X(void, glGenFramebuffers, (GLsizei, GLuint*)) X(void, glBindFramebuffer, (GLenum, GLuint)) \
     X(void, glFramebufferTexture2D, (GLenum, GLenum, GLenum, GLuint, GLint)) \
@@ -353,6 +354,83 @@ static int init_gl(void) {
     return 1;
 }
 
+/* ------------------------------------------------------------------ sharp EFB copies */
+static const char* conv_vs =
+    "#version 330 core\n"
+    "void main() { vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2); gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }\n";
+static const char* conv_fs =
+    "#version 330 core\n"
+    "uniform sampler2D u_src;\n"
+    "uniform vec4 u_rect;  /* source origin in scaled pixels, step per output pixel, intensity flag */\n"
+    "uniform ivec4 u_sel;\n"
+    "out vec4 o_color;\n"
+    "void main() {\n"
+    "  vec4 c = texture(u_src, (u_rect.xy + gl_FragCoord.xy * u_rect.z) / vec2(textureSize(u_src, 0)));\n"
+    "  float y = u_rect.w > 0.5 ? clamp(dot(c.rgb, vec3(66.0, 129.0, 25.0) / 256.0) + 16.0 / 255.0, 0.0, 1.0) : c.r;\n"
+    "  float v[6] = float[6](c.r, c.g, c.b, c.a, y, 1.0);\n"
+    "  o_color = vec4(v[u_sel.x], v[u_sel.y], v[u_sel.z], v[u_sel.w]);\n"
+    "}\n";
+static GLuint conv_prog, conv_fbo;
+static GLint cu_src, cu_rect, cu_sel;
+
+unsigned gx_gl_copy_texture(int x0, int y0, int w, int h, int half, int intensity, const int sel[4]) {
+    if (gl_state != 1 || w <= 0 || h <= 0) return 0;
+    if (!conv_prog) {
+        GLuint vs = compile(GL_VERTEX_SHADER, conv_vs), fs = compile(GL_FRAGMENT_SHADER, conv_fs);
+        if (!vs || !fs) { conv_prog = (GLuint)-1; return 0; }
+        conv_prog = p_glCreateProgram();
+        p_glAttachShader(conv_prog, vs);
+        p_glAttachShader(conv_prog, fs);
+        p_glBindFragDataLocation(conv_prog, 0, "o_color");
+        p_glLinkProgram(conv_prog);
+        GLint ok = 0;
+        p_glGetProgramiv(conv_prog, GL_LINK_STATUS, &ok);
+        if (!ok) { fprintf(stderr, "[gl] copy shader failed to link\n"); conv_prog = (GLuint)-1; return 0; }
+        cu_src = p_glGetUniformLocation(conv_prog, "u_src");
+        cu_rect = p_glGetUniformLocation(conv_prog, "u_rect");
+        cu_sel = p_glGetUniformLocation(conv_prog, "u_sel");
+        p_glGenFramebuffers(1, &conv_fbo);
+    }
+    if (conv_prog == (GLuint)-1) return 0;
+    gx_gl_flush();
+    int ow = (half ? w / 2 : w) * S, oh = (half ? h / 2 : h) * S;
+    if (ow <= 0 || oh <= 0) return 0;
+    GLuint id;
+    p_glGenTextures(1, &id);
+    p_glBindTexture(GL_TEXTURE_2D, id);
+    p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, ow, oh, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, conv_fbo);
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, id, 0);
+    p_glActiveTexture(GL_TEXTURE0);
+    p_glBindTexture(GL_TEXTURE_2D, efb_color);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    p_glDisable(GL_SCISSOR_TEST);
+    p_glDisable(GL_DEPTH_TEST);
+    p_glDisable(GL_BLEND);
+    p_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    p_glViewport(0, 0, ow, oh);
+    p_glUseProgram(conv_prog);
+    p_glUniform1i(cu_src, 0);
+    p_glUniform4f(cu_rect, (float)(x0 * S), (float)(y0 * S), half ? 2.0f : 1.0f, intensity ? 1.0f : 0.0f);
+    p_glUniform4i(cu_sel, sel[0], sel[1], sel[2], sel[3]);
+    p_glBindVertexArray(vao);
+    p_glDrawArrays(GL_TRIANGLES, 0, 3);
+    p_glBindTexture(GL_TEXTURE_2D, efb_color);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    p_glViewport(0, 0, EFB_W * S, EFB_H * S);
+    p_glUseProgram(prog);
+    return id;
+}
+
+void gx_gl_delete_texture(unsigned id) {
+    if (gl_state == 1 && id) p_glDeleteTextures(1, &id);
+}
+
 int gx_gl_state(void) { return gl_state; }
 
 int gx_gl_active(void) {
@@ -362,6 +440,7 @@ int gx_gl_active(void) {
 
 /* ------------------------------------------------------------------ textures */
 static GLuint texture_for(const GxGlTexMap* tm) {
+    if (tm->hires) return tm->hires;
     for (int i = 0; i < gltex_n; i++)
         if (gltex[i].px == tm->px) return gltex[i].id;
     if (gltex_n == GLTEX_MAX) {  /* cannot happen while the CPU-side cache is smaller */

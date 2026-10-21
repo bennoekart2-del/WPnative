@@ -35,7 +35,7 @@ static void raster_drain(void);
 void gx_raster_dirty(void);
 
 /* ------------------------------------------------------------------ textures */
-typedef struct { uint32_t addr, fmt, w, h, tlut; uint32_t* px; } TexCache;
+typedef struct { uint32_t addr, fmt, w, h, tlut; uint32_t* px; unsigned hires; } TexCache;
 #define TCACHE_MAX 1024
 static TexCache tcache[TCACHE_MAX];
 static int tcache_n, tcache_flushed, tcache_game_invalidated;
@@ -76,12 +76,41 @@ static void decode_cmpr_block(const uint8_t* s, uint32_t* out, int stride) {
         for (int x = 0; x < 4; x++) out[y * stride + x] = p[(s[4 + y] >> (6 - 2 * x)) & 3];
 }
 
-static uint32_t* decode_texture(uint32_t addr, uint32_t fmt, uint32_t w, uint32_t h, uint32_t tlut) {
+/* EFB copies kept on the GPU at the render scale, so render-to-texture effects stay sharp. One is used for
+ * a texture at its address while guest memory still holds exactly the bytes the copy wrote there. */
+typedef struct { uint32_t lo, hi, hash; int fmt, w, h; unsigned id; uint64_t seq; } HiresCopy;
+#define HIRES_MAX 64
+static HiresCopy hires[HIRES_MAX];
+static int hires_n;
+
+static uint32_t mem_hash(uint32_t lo, uint32_t hi) {
+    const uint8_t* p = g_mem + lo;
+    uint64_t h = 1469598103934665603ull;
+    for (uint32_t i = 0; i + 8 <= hi - lo; i += 8) {
+        uint64_t v;
+        memcpy(&v, p + i, 8);
+        h = (h ^ v) * 0x100000001b3ull;
+    }
+    return (uint32_t)(h ^ (h >> 32));
+}
+
+static unsigned hires_find(uint32_t addr, uint32_t fmt, uint32_t w, uint32_t h) {
+    uint32_t lo = PPC_PHYS(addr);
+    for (int i = 0; i < hires_n; i++)
+        if (hires[i].lo == lo && hires[i].fmt == (int)fmt && hires[i].w == (int)w && hires[i].h == (int)h)
+            return mem_hash(hires[i].lo, hires[i].hi) == hires[i].hash ? hires[i].id : 0;
+    return 0;
+}
+
+static uint32_t* decode_texture(uint32_t addr, uint32_t fmt, uint32_t w, uint32_t h, uint32_t tlut, unsigned* hires_id) {
     for (int i = 0; i < tcache_n; i++)
-        if (tcache[i].addr == addr && tcache[i].fmt == fmt && tcache[i].w == w && tcache[i].h == h && tcache[i].tlut == tlut)
+        if (tcache[i].addr == addr && tcache[i].fmt == fmt && tcache[i].w == w && tcache[i].h == h && tcache[i].tlut == tlut) {
+            *hires_id = tcache[i].hires;
             return tcache[i].px;
+        }
     static const int bw[16] = {8, 8, 8, 4, 4, 4, 4, 0, 8, 8, 4, 0, 0, 0, 8, 0};
     static const int bh[16] = {8, 4, 4, 4, 4, 4, 4, 0, 8, 4, 4, 0, 0, 0, 8, 0};
+    *hires_id = 0;
     if (!bw[fmt & 15]) return NULL;
     int tw = bw[fmt], th = bh[fmt];
     uint32_t W = (w + tw - 1) / tw * tw, H = (h + th - 1) / th * th;
@@ -145,7 +174,8 @@ static uint32_t* decode_texture(uint32_t addr, uint32_t fmt, uint32_t w, uint32_
         tcache_n = 0;
         tcache_flushed = 1;
     }
-    tcache[tcache_n++] = (TexCache){addr, fmt, w, h, tlut, px};
+    *hires_id = hires_n ? hires_find(addr, fmt, w, h) : 0;
+    tcache[tcache_n++] = (TexCache){addr, fmt, w, h, tlut, px, *hires_id};
     /* stride is the padded width; record it via the cache entry's w */
     tcache[tcache_n - 1].w = w;
     return px;
@@ -194,7 +224,7 @@ static int tex_get(int map, TexMap* t) {
     t->wrap_s = mode0 & 3;
     t->wrap_t = (mode0 >> 2) & 3;
     t->linear = (mode0 >> 4) & 1;
-    t->px = decode_texture(addr | 0x80000000u, fmt, (uint32_t)t->w, (uint32_t)t->h, tlut);
+    t->px = decode_texture(addr | 0x80000000u, fmt, (uint32_t)t->w, (uint32_t)t->h, tlut, &t->hires);
     return t->px != NULL;
 }
 
@@ -1108,14 +1138,14 @@ static void encode_texel(int fmt, int intensity, const uint8_t* p, uint8_t* out,
     }
 }
 
-static void copy_to_texture(uint32_t trigger, int x0, int y0, int w, int h, uint32_t dst) {
+static uint32_t copy_to_texture(uint32_t trigger, int x0, int y0, int w, int h, uint32_t dst) {
     int fmt = (int)(((trigger >> 4) & 7) | (((trigger >> 3) & 1) << 3));
     int intensity = (trigger >> 15) & 1, half = (trigger >> 9) & 1;
     int tw = half ? w / 2 : w, th = half ? h / 2 : h;
     uint8_t probe[4]; int bits;
     encode_texel(fmt, 0, (const uint8_t[4]){0, 0, 0, 0}, probe, &bits);
     int bw = bits == 4 ? 8 : bits == 8 ? 8 : 4, bh = bits == 4 ? 8 : 4;
-    uint8_t* out = g_mem + PPC_PHYS(dst | 0x80000000u);
+    uint8_t* out = g_mem + PPC_PHYS(dst | 0x80000000u), *start = out;
     for (int by = 0; by < th; by += bh)
         for (int bx = 0; bx < tw; bx += bw) {
             uint8_t block[64] = {0};
@@ -1142,6 +1172,42 @@ static void copy_to_texture(uint32_t trigger, int x0, int y0, int w, int h, uint
             memcpy(out, block, (size_t)sz);
             out += sz;
         }
+    return (uint32_t)(out - start);
+}
+
+static void hires_drop(int i) {
+    invalidate_textures_in(hires[i].lo, hires[i].hi);
+    gx_gl_delete_texture(hires[i].id);
+    hires[i] = hires[--hires_n];
+}
+
+/* Keeps a sharp GPU copy of a texture copy that just wrote guest memory [lo, hi). */
+static void hires_add(uint32_t trigger, int x0, int y0, int w, int h, uint32_t lo, uint32_t hi) {
+    /* the texture format each copy format is read back as, and where its channels come from
+     * (0..3 = r, g, b, a, 4 = intensity, 5 = one); mirrors encode_texel() and decode_texture() */
+    static const struct { int fmt, sel[4]; } as[16] = {
+        {0, {4, 4, 4, 4}}, {1, {4, 4, 4, 4}}, {2, {4, 4, 4, 3}}, {3, {4, 4, 4, 3}},
+        {4, {0, 1, 2, 5}}, {5, {0, 1, 2, 3}}, {6, {0, 1, 2, 3}}, {1, {3, 3, 3, 3}},
+        {1, {4, 4, 4, 4}}, {1, {1, 1, 1, 1}}, {1, {2, 2, 2, 2}}, {3, {0, 0, 0, 1}},
+        {3, {1, 1, 1, 2}}, {6, {0, 1, 2, 3}}, {6, {0, 1, 2, 3}}, {6, {0, 1, 2, 3}},
+    };
+    static uint64_t seq;
+    int fmt = (int)(((trigger >> 4) & 7) | (((trigger >> 3) & 1) << 3));
+    int intensity = (trigger >> 15) & 1, half = (trigger >> 9) & 1;
+    for (int i = hires_n - 1; i >= 0; i--)
+        if (hires[i].lo < hi && hires[i].hi > lo) hires_drop(i);
+    if (hires_n == HIRES_MAX) {
+        int old = 0;
+        for (int i = 1; i < hires_n; i++) if (hires[i].seq < hires[old].seq) old = i;
+        hires_drop(old);
+    }
+    static int off = -1;
+    if (off < 0) off = getenv("WPR_SHARP_COPIES") && atoi(getenv("WPR_SHARP_COPIES")) == 0;
+    if (off) return;
+    unsigned id = gx_gl_copy_texture(x0, y0, w, h, half, intensity, as[fmt].sel);
+    if (!id) return;
+    if (gx_tracing()) fprintf(stderr, "[gxc] sharp copy %dx%d fmt %d -> %08X\n", half ? w / 2 : w, half ? h / 2 : h, fmt, lo);
+    hires[hires_n++] = (HiresCopy){lo, hi, mem_hash(lo, hi), as[fmt].fmt, half ? w / 2 : w, half ? h / 2 : h, id, ++seq};
 }
 
 void gx_efb_copy(uint32_t trigger) {
@@ -1200,8 +1266,9 @@ void gx_efb_copy(uint32_t trigger) {
         if (!tcache_game_invalidated) gx_invalidate_textures();
         tcache_game_invalidated = 0;
     } else {
-        copy_to_texture(trigger, x0, y0, w, h, dst);
-        invalidate_textures_in(PPC_PHYS(dst | 0x80000000u), PPC_PHYS(dst | 0x80000000u) + (uint32_t)(w * h * 4));
+        uint32_t n = copy_to_texture(trigger, x0, y0, w, h, dst), lo = PPC_PHYS(dst | 0x80000000u);
+        invalidate_textures_in(lo, lo + (uint32_t)(w * h * 4));
+        if (gl) hires_add(trigger, x0, y0, w, h, lo, lo + n);
     }
     if (trigger & (1u << 11)) {
         uint32_t ar = g_bp[0x4F], gb = g_bp[0x50];
