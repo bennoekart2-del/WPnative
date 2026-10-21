@@ -7,6 +7,7 @@
  * One player per device: the keyboard and mouse are player 1, each gamepad is the next player (2-4).
  */
 #include <SDL3/SDL.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,7 @@ static SDL_Texture* xfb_tex;
 static int xfb_w, xfb_h;
 static SDL_Gamepad* pads[MAX_PLAYERS];
 static HostRemote remotes[MAX_PLAYERS];
+static int sideways;
 static SDL_GLContext gl_context;  /* with OpenGL the GX renderer draws into the window itself */
 static SDL_AtomicInt view[4];      /* where the picture sits in the window, in pixels */
 
@@ -62,6 +64,8 @@ int platform_render_scale(void) {
     return s < 1 ? 1 : s > 6 ? 6 : s;
 }
 
+static void load_key_overrides(void);
+
 int platform_init(const char* title, int width, int height) {
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | SDL_INIT_AUDIO)) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
@@ -92,6 +96,9 @@ int platform_init(const char* title, int width, int height) {
         SDL_SetRenderLogicalPresentation(renderer, platform_widescreen() ? 848 : 640, 480,
                                          SDL_LOGICAL_PRESENTATION_LETTERBOX);
     }
+    load_key_overrides();
+    if (getenv("WPR_SIDEWAYS") && atoi(getenv("WPR_SIDEWAYS"))) sideways = 1;
+    if (getenv("WPR_FULLSCREEN") && atoi(getenv("WPR_FULLSCREEN"))) SDL_SetWindowFullscreen(window, true);
     platform_set_fps(0);
     return 1;
 }
@@ -126,14 +133,33 @@ static float axis(SDL_Gamepad* g, SDL_GamepadAxis a) {
 typedef struct {
     SDL_Scancode up, down, left, right, a, b, one, two, plus, minus, home, shake, a2, b2, ab;
 } KeySet;
-static const KeySet p1_keys = {
+static KeySet p1_keys = {
     SDL_SCANCODE_UP, SDL_SCANCODE_DOWN, SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT, SDL_SCANCODE_RETURN,
     SDL_SCANCODE_BACKSPACE, SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_EQUALS, SDL_SCANCODE_MINUS,
     SDL_SCANCODE_H, SDL_SCANCODE_RSHIFT, SDL_SCANCODE_SPACE, SDL_SCANCODE_RCTRL, SDL_SCANCODE_TAB};
 static const KeySet no_keys = {SDL_SCANCODE_UNKNOWN};
-static int sideways;
 static float key_ptr[MAX_PLAYERS][2];
 static uint64_t mouse_moved_ns, last_poll_ns;
+
+/* The launcher rebinds player 1's keys with WPR_KEY_<NAME>=<SDL key name>, e.g. WPR_KEY_A=Space. */
+static void load_key_overrides(void) {
+    static const struct { const char* name; size_t off; } names[] = {
+        {"UP", offsetof(KeySet, up)}, {"DOWN", offsetof(KeySet, down)}, {"LEFT", offsetof(KeySet, left)},
+        {"RIGHT", offsetof(KeySet, right)}, {"A", offsetof(KeySet, a)}, {"B", offsetof(KeySet, b)},
+        {"1", offsetof(KeySet, one)}, {"2", offsetof(KeySet, two)}, {"PLUS", offsetof(KeySet, plus)},
+        {"MINUS", offsetof(KeySet, minus)}, {"HOME", offsetof(KeySet, home)}, {"SHAKE", offsetof(KeySet, shake)},
+        {"A2", offsetof(KeySet, a2)}, {"B2", offsetof(KeySet, b2)}, {"AB", offsetof(KeySet, ab)},
+    };
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
+        char var[32];
+        SDL_snprintf(var, sizeof var, "WPR_KEY_%s", names[i].name);
+        const char* v = getenv(var);
+        if (!v || !*v) continue;
+        SDL_Scancode sc = SDL_GetScancodeFromName(v);
+        if (sc == SDL_SCANCODE_UNKNOWN) { fprintf(stderr, "[keys] unknown key '%s' for %s\n", v, var); continue; }
+        *(SDL_Scancode*)((char*)&p1_keys + names[i].off) = sc;
+    }
+}
 
 static int down(const bool* keys, SDL_Scancode k) { return k != SDL_SCANCODE_UNKNOWN && keys[k]; }
 

@@ -28,3 +28,6 @@ F1   Switches the arrow keys between "pointing at the screen" and "Remote held s
 F11  Full screen on/off.
 
 The title bar also shows the frame rate.
+
+Launcher: double-click "Wii Party.bat" to pick the disc folder, upscale, screen shape,
+full screen and player 1 keys, then press Play. Settings are kept in settings.ini.
