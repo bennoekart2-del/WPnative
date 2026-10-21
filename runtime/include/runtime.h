@@ -21,6 +21,7 @@ int platform_pump(void);                /* returns 0 when the user closed the wi
 void platform_present_xfb(const uint8_t* yuyv, int width, int height, int pitch); /* VI external framebuffer */
 const HostRemote* platform_remote(int player);
 void platform_shutdown(void);
+void platform_set_fps(int fps);         /* shown in the title bar */
 
 /* Hardware register handlers (hw.c) */
 void hw_vi_write(uint32_t addr, uint32_t val, int size);

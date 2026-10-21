@@ -217,9 +217,14 @@ static void load_bp(uint32_t v) {
     g_bp[0xFE] = 0;
     if (reg >= 0xE0 && reg < 0xE8 && (val & 0x800000)) {
         g_konst[(reg - 0xE0) >> 1][reg & 1] = val;
+        gx_raster_dirty();
         return;
     }
     g_bp[reg] = (g_bp[reg] & ~mask) | (val & mask);
+    /* registers the rasterizer's per-draw state is built from */
+    if (reg == 0x00 || (reg >= 0x28 && reg < 0x30) || reg == 0x40 || reg == 0x41 || (reg >= 0x80 && reg < 0xC0) ||
+        reg >= 0xC0)
+        gx_raster_dirty();
     switch (reg) {
     case 0x45: case 0x47: case 0x48: gx_pe_event(reg, val); break;
     case 0x52: stats.efb_copies++; gx_efb_copy(val); break;

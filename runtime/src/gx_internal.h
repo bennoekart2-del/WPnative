@@ -30,4 +30,5 @@ void gx_triangle(const GxPipeVertex* v0, const GxPipeVertex* v1, const GxPipeVer
 void gx_efb_copy(uint32_t trigger);
 void gx_load_tlut(void);
 void gx_invalidate_textures(void);
+void gx_raster_dirty(void);     /* a BP register the per-draw raster state depends on changed */
 void gx_pe_event(int reg, uint32_t v);  /* BP 0x45 (draw done), 0x47/0x48 (tokens) */

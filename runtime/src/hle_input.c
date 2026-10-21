@@ -57,6 +57,26 @@ static uint16_t scripted_buttons(int chan) {
     return b;
 }
 
+/* WPR_POINT="0.2,-0.4@900;-0.5,0@1200" puts player 1's pointer at x,y (-1..1) from a read count on. */
+static int scripted_pointer(int chan, float* x, float* y) {
+    const char* s = getenv("WPR_POINT");
+    if (!s || chan != 0) return 0;
+    int hit = 0;
+    while (*s) {
+        char* end;
+        float px = strtof(s, &end);
+        if (*end != ',') break;
+        float py = strtof(end + 1, &end);
+        if (*end != '@') break;
+        unsigned at = (unsigned)strtoul(end + 1, &end, 10);
+        if (reads[0] >= at) { *x = px; *y = py; hit = 1; }
+        s = end;
+        if (*s != ';') break;
+        s++;
+    }
+    return hit;
+}
+
 static int connected(int chan) {
     return chan >= 0 && chan < MAX_PLAYERS && platform_remote(chan)->connected;
 }
@@ -89,6 +109,7 @@ void hle_KPADReadEx(PPCContext* c) {
     uint16_t hold = r->buttons | scripted_buttons(chan);
     uint16_t old = prev[chan].hold;
     float px = r->ir_x, py = r->ir_y;
+    scripted_pointer(chan, &px, &py);
     float vx = px - prev[chan].pos[0], vy = py - prev[chan].pos[1];
 
     for (uint32_t i = 0; i < KPAD_STATUS_SIZE; i += 4) mem_w32(buf + i, 0);

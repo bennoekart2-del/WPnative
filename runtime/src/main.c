@@ -94,6 +94,14 @@ int main(int argc, char** argv) {
             platform_present_xfb(test_xfb, 640, 480, 1280);
             continue;
         }
+        static uint64_t fps_t0, fps_n0;
+        extern uint64_t g_xfb_copies;
+        uint64_t now = SDL_GetTicksNS();
+        if (now - fps_t0 >= 1000000000ull) {
+            if (fps_t0) platform_set_fps((int)((g_xfb_copies - fps_n0) * 1000000000ull / (now - fps_t0)));
+            fps_t0 = now;
+            fps_n0 = g_xfb_copies;
+        }
         uint32_t xfb = hw_vi_xfb_addr();
         platform_present_xfb(xfb ? g_mem + PPC_PHYS(xfb) : NULL, g_xfb_w & ~1, g_xfb_h, g_xfb_stride);
         if (frame % 300 == 0) {

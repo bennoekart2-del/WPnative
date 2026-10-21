@@ -15,7 +15,7 @@ FetchContent_MakeAvailable(SDL3)
 
 set(RUNTIME_SRC
     runtime/src/main.c runtime/src/boot.c runtime/src/cpu_services.c runtime/src/hw.c runtime/src/dsp.c
-    runtime/src/gx_fifo.c runtime/src/gx_render.c runtime/src/platform_sdl.c runtime/src/threads.c
+    runtime/src/gx_fifo.c runtime/src/gx_render.c runtime/src/gx_gl.c runtime/src/platform_sdl.c runtime/src/platform_audio.c runtime/src/threads.c
     runtime/src/ipc.c runtime/src/ios_devices.c runtime/src/hle_input.c runtime/src/rel_link.c runtime/src/nand_defaults.c)
 
 if(WPR_GEN_DIR)

@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "gx_gl.h"
 #include "gx_internal.h"
 #include "ppc_context.h"
 
@@ -30,10 +31,14 @@ uint64_t g_draw_count;
 
 static float xff(int a) { float f; memcpy(&f, &g_xf[a], 4); return f; }
 
+static void raster_drain(void);
+void gx_raster_dirty(void);
+
 /* ------------------------------------------------------------------ textures */
 typedef struct { uint32_t addr, fmt, w, h, tlut; uint32_t* px; } TexCache;
-static TexCache tcache[256];
-static int tcache_n;
+#define TCACHE_MAX 1024
+static TexCache tcache[TCACHE_MAX];
+static int tcache_n, tcache_flushed, tcache_game_invalidated;
 
 static uint32_t rgba(int r, int g, int b, int a) { return (uint32_t)r | (uint32_t)g << 8 | (uint32_t)b << 16 | (uint32_t)a << 24; }
 static int e5(int v) { return (v << 3) | (v >> 2); }
@@ -134,7 +139,12 @@ static uint32_t* decode_texture(uint32_t addr, uint32_t fmt, uint32_t w, uint32_
                 break;
             }
         }
-    if (tcache_n == 256) { for (int i = 0; i < tcache_n; i++) free(tcache[i].px); tcache_n = 0; }
+    if (tcache_n == TCACHE_MAX) {  /* full: start over (callers holding pointers retry, see build_state) */
+        raster_drain();
+        for (int i = 0; i < tcache_n; i++) { gx_gl_forget_texture(tcache[i].px); free(tcache[i].px); }
+        tcache_n = 0;
+        tcache_flushed = 1;
+    }
     tcache[tcache_n++] = (TexCache){addr, fmt, w, h, tlut, px};
     /* stride is the padded width; record it via the cache entry's w */
     tcache[tcache_n - 1].w = w;
@@ -142,11 +152,33 @@ static uint32_t* decode_texture(uint32_t addr, uint32_t fmt, uint32_t w, uint32_
 }
 
 void gx_invalidate_textures(void) {
-    for (int i = 0; i < tcache_n; i++) free(tcache[i].px);
+    tcache_game_invalidated = 1;
+    if (!tcache_n) return;
+    raster_drain();
+    for (int i = 0; i < tcache_n; i++) { gx_gl_forget_texture(tcache[i].px); free(tcache[i].px); }
     tcache_n = 0;
+    gx_raster_dirty();
 }
 
-typedef struct { uint32_t* px; int w, h, stride; int wrap_s, wrap_t, linear; } TexMap;
+/* Drops cached textures decoded from guest memory in [lo, hi) (after an EFB copy wrote there),
+ * or, with lo == hi == 0, every paletted texture (after a TLUT load). */
+static void invalidate_textures_in(uint32_t lo, uint32_t hi) {
+    int n = 0, hit = 0;
+    for (int i = 0; i < tcache_n; i++) {
+        TexCache* t = &tcache[i];
+        int pal = t->fmt == 8 || t->fmt == 9 || t->fmt == 10;
+        uint32_t a = PPC_PHYS(t->addr), end = a + t->w * t->h * 4 + 4096;  /* generous: covers padding and 32bpp */
+        if (lo == hi ? pal : (a < hi && end > lo)) {
+            if (!hit) { raster_drain(); hit = 1; }
+            gx_gl_forget_texture(t->px);
+            free(t->px);
+        } else tcache[n++] = *t;
+    }
+    tcache_n = n;
+    if (hit) gx_raster_dirty();
+}
+
+typedef GxGlTexMap TexMap;
 
 static int tex_get(int map, TexMap* t) {
     int set = map < 4 ? 0 : 0x20;
@@ -198,9 +230,10 @@ static int clamp255(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
 
 typedef struct { int c[4]; } Col;
 
-static void tev_konst(int stage, int alpha, int out[4]) {
-    uint32_t ksel = g_bp[0xF6 + stage / 2];
-    int sel = alpha ? (int)((ksel >> (stage & 1 ? 19 : 9)) & 31) : (int)((ksel >> (stage & 1 ? 14 : 4)) & 31);
+typedef GxGlStage Stage;
+typedef GxGlState RasterState;
+
+static void tev_konst(int sel, int out[4]) {
     if (sel < 8) { /* 1, 7/8, 3/4, 5/8, 1/2, 3/8, 1/4, 1/8 */
         static const int frac[8] = {255, 223, 191, 159, 128, 96, 64, 32};
         out[0] = out[1] = out[2] = out[3] = frac[sel];
@@ -217,9 +250,19 @@ static void tev_konst(int stage, int alpha, int out[4]) {
     out[0] = out[1] = out[2] = out[3] = v[k][comp];
 }
 
-static Col tev_regs[4];
+static void swap_table(int table, int out[4]) {
+    uint32_t a = g_bp[0xF6 + table * 2], b = g_bp[0xF7 + table * 2];
+    out[0] = a & 3; out[1] = (a >> 2) & 3; out[2] = b & 3; out[3] = (b >> 2) & 3;
+}
 
-static void tev_load_regs(void) {
+static void build_state_once(RasterState* rs) {
+    uint32_t gen = g_bp[0x00];
+    rs->nstages = (int)((gen >> 10) & 15) + 1;
+    rs->ntex = (int)(gen & 15);
+    rs->ncol = (int)((gen >> 4) & 7);
+    rs->alpha_cfg = g_bp[0xF3];
+    rs->zmode = g_bp[0x40];
+    rs->cmode = g_bp[0x41];
     for (int i = 0; i < 4; i++) {
         uint32_t ra = g_bp[0xE0 + i * 2], bg = g_bp[0xE1 + i * 2];
         int r = ra & 0x7FF, a = (ra >> 12) & 0x7FF, b = bg & 0x7FF, g = (bg >> 12) & 0x7FF;
@@ -227,51 +270,71 @@ static void tev_load_regs(void) {
         if (a & 0x400) a -= 0x800;
         if (b & 0x400) b -= 0x800;
         if (g & 0x400) g -= 0x800;
-        tev_regs[i].c[0] = r; tev_regs[i].c[1] = g; tev_regs[i].c[2] = b; tev_regs[i].c[3] = a;
+        rs->regs[i][0] = r; rs->regs[i][1] = g; rs->regs[i][2] = b; rs->regs[i][3] = a;
+    }
+    for (int s = 0; s < rs->nstages; s++) {
+        Stage* st = &rs->st[s];
+        uint32_t tref = g_bp[0x28 + s / 2] >> ((s & 1) * 12);
+        int texmap = st->texmap = tref & 7;
+        st->texcoord = (tref >> 3) & 7;
+        st->texen = ((tref >> 6) & 1) && st->texcoord < rs->ntex && tex_get(texmap, &st->tm);
+        st->ras_sel = (tref >> 7) & 7;
+        uint32_t ce = g_bp[0xC0 + s * 2], ae = g_bp[0xC1 + s * 2];
+        swap_table((int)((ae >> 2) & 3), st->tsw);
+        swap_table((int)(ae & 3), st->rsw);
+        uint32_t ksel = g_bp[0xF6 + s / 2];
+        int kc[4], ka[4];
+        tev_konst((int)((ksel >> (s & 1 ? 14 : 4)) & 31), kc);
+        tev_konst((int)((ksel >> (s & 1 ? 19 : 9)) & 31), ka);
+        st->konst[0] = kc[0]; st->konst[1] = kc[1]; st->konst[2] = kc[2];
+        st->kalpha = ka[3];
+        for (int i = 0; i < 4; i++) {
+            st->csel[i] = (int)((ce >> (12 - 4 * i)) & 15);
+            st->asel[i] = (int)((ae >> (13 - 3 * i)) & 7);
+        }
+        st->c_bias = (int)((ce >> 16) & 3); st->c_sub = (int)((ce >> 18) & 1); st->c_clamp = (int)((ce >> 19) & 1);
+        st->c_scale = (int)((ce >> 20) & 3); st->c_dest = (int)((ce >> 22) & 3);
+        st->a_bias = (int)((ae >> 16) & 3); st->a_sub = (int)((ae >> 18) & 1); st->a_clamp = (int)((ae >> 19) & 1);
+        st->a_scale = (int)((ae >> 20) & 3); st->a_dest = (int)((ae >> 22) & 3);
     }
 }
 
-static void swap_apply(int table, int in[4], int out[4]) {
-    uint32_t a = g_bp[0xF6 + table * 2], b = g_bp[0xF7 + table * 2];
-    int sr = a & 3, sg = (a >> 2) & 3, sb = b & 3, sa = (b >> 2) & 3;
-    out[0] = in[sr]; out[1] = in[sg]; out[2] = in[sb]; out[3] = in[sa];
+static void build_state(RasterState* rs) {
+    do { tcache_flushed = 0; build_state_once(rs); } while (tcache_flushed);
 }
 
-static void tev_shade(const int ras[2][4], const float tc[8][2], int numtex, int out[4]) {
-    uint32_t gen = g_bp[0x00];
-    int stages = (int)((gen >> 10) & 15) + 1;
+static int tev_combine(int A, int B, int C, int D, int bias, int sub, int scale, int clamp) {
+    A &= 255; B &= 255; C &= 255;
+    int v;
+    if (bias == 3) v = D + (A > B ? C : 0);  /* compare modes */
+    else {
+        int lerp = (A * (256 - (C + (C >> 7))) + B * (C + (C >> 7))) >> 8;
+        v = (sub ? D - lerp : D + lerp) + (bias == 1 ? 128 : bias == 2 ? -128 : 0);
+        v = scale == 3 ? v / 2 : v << (scale == 1 ? 1 : scale == 2 ? 2 : 0);
+    }
+    return clamp ? clamp255(v) : (v < -1024 ? -1024 : v > 1023 ? 1023 : v);
+}
+
+static void tev_shade(const RasterState* rs, const int ras[2][4], const float tc[8][2], int out[4]) {
     Col r[4];
-    memcpy(r, tev_regs, sizeof r);  /* r[0] = PREV, r[1..3] = REG0..2 per GX naming: PREV is reg 0 */
+    memcpy(r, rs->regs, sizeof r);  /* r[0] = PREV, r[1..3] = REG0..2 */
     int tex[4] = {255, 255, 255, 255};
-    for (int s = 0; s < stages; s++) {
-        uint32_t tref = g_bp[0x28 + s / 2] >> ((s & 1) * 12);
-        int texmap = tref & 7, texcoord = (tref >> 3) & 7, texen = (tref >> 6) & 1, ras_sel = (tref >> 7) & 7;
-        if (texen && texcoord < numtex) {
-            TexMap tm;
-            int raw[4] = {255, 255, 255, 255};
-            if (tex_get(texmap, &tm)) tex_sample(&tm, tc[texcoord][0], tc[texcoord][1], raw);
-            int tsw = (int)((g_bp[0xC1 + s * 2] >> 2) & 3);
-            swap_apply(tsw, raw, tex);
+    for (int s = 0; s < rs->nstages; s++) {
+        const Stage* st = &rs->st[s];
+        if (st->texen) {
+            int raw[4];
+            tex_sample(&st->tm, tc[st->texcoord][0], tc[st->texcoord][1], raw);
+            for (int k = 0; k < 4; k++) tex[k] = raw[st->tsw[k]];
         }
         int rasc[4] = {0, 0, 0, 0};
-        if (ras_sel == 0 || ras_sel == 1) {
-            int rsw = (int)(g_bp[0xC1 + s * 2] & 3), tmp[4];
-            memcpy(tmp, ras[ras_sel], sizeof tmp);
-            swap_apply(rsw, tmp, rasc);
-        } else if (ras_sel == 7) {
-            rasc[0] = rasc[1] = rasc[2] = rasc[3] = 0;
-        }
-        int konst[4], kalpha[4];
-        tev_konst(s, 0, konst);
-        tev_konst(s, 1, kalpha);
-        uint32_t ce = g_bp[0xC0 + s * 2], ae = g_bp[0xC1 + s * 2];
-        /* color inputs */
+        if (st->ras_sel <= 1)
+            for (int k = 0; k < 4; k++) rasc[k] = ras[st->ras_sel][st->rsw[k]];
         int cin[4][3];
         for (int i = 0; i < 4; i++) {
-            int sel = (int)((ce >> (12 - 4 * i)) & 15);
+            int sel = st->csel[i];
             int* d = cin[i];
             switch (sel) {
-            case 0: case 2: case 4: case 6: { Col* x = &r[sel / 2]; d[0] = x->c[0]; d[1] = x->c[1]; d[2] = x->c[2]; break; }
+            case 0: case 2: case 4: case 6: { const Col* x = &r[sel / 2]; d[0] = x->c[0]; d[1] = x->c[1]; d[2] = x->c[2]; break; }
             case 1: case 3: case 5: case 7: { int a = r[sel / 2].c[3]; d[0] = d[1] = d[2] = a; break; }
             case 8: d[0] = tex[0]; d[1] = tex[1]; d[2] = tex[2]; break;
             case 9: d[0] = d[1] = d[2] = tex[3]; break;
@@ -279,59 +342,22 @@ static void tev_shade(const int ras[2][4], const float tc[8][2], int numtex, int
             case 11: d[0] = d[1] = d[2] = rasc[3]; break;
             case 12: d[0] = d[1] = d[2] = 255; break;
             case 13: d[0] = d[1] = d[2] = 128; break;
-            case 14: d[0] = konst[0]; d[1] = konst[1]; d[2] = konst[2]; break;
+            case 14: d[0] = st->konst[0]; d[1] = st->konst[1]; d[2] = st->konst[2]; break;
             default: d[0] = d[1] = d[2] = 0; break;
             }
         }
         int ain[4];
         for (int i = 0; i < 4; i++) {
-            int sel = (int)((ae >> (13 - 3 * i)) & 7);
-            switch (sel) {
-            case 0: case 1: case 2: case 3: ain[i] = r[sel].c[3]; break;
-            case 4: ain[i] = tex[3]; break;
-            case 5: ain[i] = rasc[3]; break;
-            case 6: ain[i] = kalpha[3]; break;
-            default: ain[i] = 0; break;
-            }
+            int sel = st->asel[i];
+            ain[i] = sel < 4 ? r[sel].c[3] : sel == 4 ? tex[3] : sel == 5 ? rasc[3] : sel == 6 ? st->kalpha : 0;
         }
-        static const int scales[4] = {1, 2, 4, 1};
-        /* color op */
-        {
-            int bias = (int)((ce >> 16) & 3), sub = (int)((ce >> 18) & 1), clamp = (int)((ce >> 19) & 1);
-            int scale = (int)((ce >> 20) & 3), dest = (int)((ce >> 22) & 3);
-            for (int ch = 0; ch < 3; ch++) {
-                int A = cin[0][ch] & 255, B = cin[1][ch] & 255, C = cin[2][ch] & 255, D = cin[3][ch];
-                int lerp = (A * (256 - (C + (C >> 7))) + B * (C + (C >> 7))) >> 8;
-                int v;
-                if (bias == 3) { /* compare modes */
-                    v = D + (A > B ? C : 0);
-                } else {
-                    int bb = bias == 1 ? 128 : bias == 2 ? -128 : 0;
-                    v = sub ? D - lerp : D + lerp;
-                    v += bb;
-                    v = scale == 3 ? v / 2 : v * scales[scale];
-                }
-                r[dest].c[ch] = clamp ? clamp255(v) : (v < -1024 ? -1024 : v > 1023 ? 1023 : v);
-            }
-        }
-        {
-            int bias = (int)((ae >> 16) & 3), sub = (int)((ae >> 18) & 1), clamp = (int)((ae >> 19) & 1);
-            int scale = (int)((ae >> 20) & 3), dest = (int)((ae >> 22) & 3);
-            int A = ain[0] & 255, B = ain[1] & 255, C = ain[2] & 255, D = ain[3];
-            int lerp = (A * (256 - (C + (C >> 7))) + B * (C + (C >> 7))) >> 8;
-            int v;
-            if (bias == 3) v = D + (A > B ? C : 0);
-            else {
-                int bb = bias == 1 ? 128 : bias == 2 ? -128 : 0;
-                v = (sub ? D - lerp : D + lerp) + bb;
-                v = scale == 3 ? v / 2 : v * scales[scale];
-            }
-            r[dest].c[3] = clamp ? clamp255(v) : (v < -1024 ? -1024 : v > 1023 ? 1023 : v);
-        }
-        if (s == stages - 1) {
-            int dest = (int)((ce >> 22) & 3), adest = (int)((ae >> 22) & 3);
-            out[0] = clamp255(r[dest].c[0]); out[1] = clamp255(r[dest].c[1]);
-            out[2] = clamp255(r[dest].c[2]); out[3] = clamp255(r[adest].c[3]);
+        for (int ch = 0; ch < 3; ch++)
+            r[st->c_dest].c[ch] = tev_combine(cin[0][ch], cin[1][ch], cin[2][ch], cin[3][ch],
+                                              st->c_bias, st->c_sub, st->c_scale, st->c_clamp);
+        r[st->a_dest].c[3] = tev_combine(ain[0], ain[1], ain[2], ain[3], st->a_bias, st->a_sub, st->a_scale, st->a_clamp);
+        if (s == rs->nstages - 1) {
+            out[0] = clamp255(r[st->c_dest].c[0]); out[1] = clamp255(r[st->c_dest].c[1]);
+            out[2] = clamp255(r[st->c_dest].c[2]); out[3] = clamp255(r[st->a_dest].c[3]);
         }
     }
 }
@@ -349,8 +375,7 @@ static int alpha_cmp(int a, int ref, int fn) {
     }
 }
 
-static int alpha_test(int a) {
-    uint32_t ac = g_bp[0xF3];
+static int alpha_test(uint32_t ac, int a) {
     int r0 = alpha_cmp(a, ac & 255, (ac >> 16) & 7), r1 = alpha_cmp(a, (ac >> 8) & 255, (ac >> 19) & 7);
     switch ((ac >> 22) & 3) {
     case 0: return r0 && r1;
@@ -373,12 +398,12 @@ static int blend_factor(int f, const int src[4], const int dst[4], int ch, int i
     }
 }
 
-static void write_pixel(int x, int y, float z, const int col[4]) {
-    uint32_t zmode = g_bp[0x40];
+static void write_pixel(const RasterState* rs, int x, int y, float z, const int col[4]) {
+    uint32_t zmode = rs->zmode;
     if (zmode & 1) {
         float zr = zbuf[y][x];
-        int fn = (int)((zmode >> 1) & 7), pass;
-        switch (fn) {
+        int pass;
+        switch ((zmode >> 1) & 7) {
         case 0: pass = 0; break;
         case 1: pass = z < zr; break;
         case 2: pass = z == zr; break;
@@ -391,10 +416,11 @@ static void write_pixel(int x, int y, float z, const int col[4]) {
         if (!pass) return;
         if (zmode & 0x10) zbuf[y][x] = z;
     }
-    uint32_t cm = g_bp[0x41];
+    uint32_t cm = rs->cmode;
     uint8_t* d = efb[y][x];
-    int dst[4] = {d[0], d[1], d[2], d[3]}, out[4];
+    int out[4];
     if (cm & 1) {
+        int dst[4] = {d[0], d[1], d[2], d[3]};
         int sf = (int)((cm >> 8) & 7), df = (int)((cm >> 5) & 7);
         for (int ch = 0; ch < 4; ch++) {
             if (cm & 0x800) out[ch] = clamp255(dst[ch] - col[ch]);
@@ -484,7 +510,177 @@ static void scissor(int* x0, int* y0, int* x1, int* y1) {
     if (*y1 > EFB_H) *y1 = EFB_H;
 }
 
+
+/* ------------------------------------------------------------------ rasterizer
+ * The decoder thread sets up each triangle (screen positions, edge equations, the resolved
+ * RasterState) and queues it; raster workers shade it. Every worker walks every triangle in
+ * order but only touches its own 8-line bands of the EFB, so per-pixel draw order is kept and
+ * no two workers write the same pixel. Anything that reads the EFB or frees textures drains
+ * the queue first (raster_drain). WPR_RASTER_THREADS=0 shades on the decoder thread. */
+#include <SDL3/SDL_atomic.h>
+#include <SDL3/SDL_cpuinfo.h>
+#include <SDL3/SDL_mutex.h>
+#include <SDL3/SDL_thread.h>
+#include <SDL3/SDL_timer.h>
+
+typedef struct {
+    const RasterState* rs;
+    float sx[3], sy[3], sz[3], iw[3];
+    float e0[3], e1[3];      /* normalized edge functions: w = e[0] + e[1]*px + e[2]*py */
+    int minx, miny, maxx, maxy;
+    float col[3][2][4];
+    float tc[3][8][3];
+} RasterJob;
+
+#define JOBS 4096
+#define STATES 64
+#define BAND_SHIFT 3
+static RasterJob jobs[JOBS];
+static RasterState states[STATES];
+static uint64_t state_last_job[STATES];  /* jobs up to here use the slot */
+static int cur_state = -1, nstate;
+static int raster_dirty = 1;
+static uint64_t job_w;                   /* decoder-owned count of queued jobs */
+static SDL_AtomicInt pub_lo;             /* published job count (low 32 bits suffice: ring is small) */
+static int nworkers = -1;
+static SDL_AtomicInt done[8];            /* jobs each worker has finished */
+static SDL_AtomicInt sleepers;
+static SDL_Mutex* wake_mu;
+static SDL_Condition* wake_cv;
+
+void gx_raster_dirty(void) { raster_dirty = 1; }
+
+static void raster_job(const RasterJob* j, int band, int nbands) {
+    const RasterState* rs = j->rs;
+    const float* sz = j->sz;
+    const float* iw = j->iw;
+    for (int y = j->miny; y < j->maxy; y++) {
+        if (nbands > 1 && ((y >> BAND_SHIFT) % nbands) != band) {
+            /* skip to the first line of the next band of ours */
+            continue;
+        }
+        float py = y + 0.5f;
+        float r0 = j->e0[0] + j->e0[2] * py, r1 = j->e1[0] + j->e1[2] * py;
+        for (int x = j->minx; x < j->maxx; x++) {
+            float px = x + 0.5f;
+            float w0 = r0 + j->e0[1] * px, w1 = r1 + j->e1[1] * px;
+            float w2 = 1.0f - w0 - w1;
+            if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+            float pw = 1.0f / (w0 * iw[0] + w1 * iw[1] + w2 * iw[2]);
+            float b0 = w0 * iw[0] * pw, b1 = w1 * iw[1] * pw, b2 = w2 * iw[2] * pw;
+            int ras[2][4];
+            for (int ch = 0; ch < 2; ch++)
+                for (int k = 0; k < 4; k++) {
+                    float cv = ch < rs->ncol || rs->ncol == 0
+                                   ? b0 * j->col[0][ch][k] + b1 * j->col[1][ch][k] + b2 * j->col[2][ch][k] : 0;
+                    ras[ch][k] = clamp255((int)(cv + 0.5f));
+                }
+            float tc[8][2];
+            for (int t = 0; t < rs->ntex; t++) {
+                float s = b0 * j->tc[0][t][0] + b1 * j->tc[1][t][0] + b2 * j->tc[2][t][0];
+                float tt = b0 * j->tc[0][t][1] + b1 * j->tc[1][t][1] + b2 * j->tc[2][t][1];
+                float q = b0 * j->tc[0][t][2] + b1 * j->tc[1][t][2] + b2 * j->tc[2][t][2];
+                if (q != 0 && q != 1) { s /= q; tt /= q; }
+                tc[t][0] = s; tc[t][1] = tt;
+            }
+            int col[4];
+            tev_shade(rs, (const int (*)[4])ras, (const float (*)[2])tc, col);
+            if (!alpha_test(rs->alpha_cfg, col[3])) continue;
+            write_pixel(rs, x, y, w0 * sz[0] + w1 * sz[1] + w2 * sz[2], col);
+        }
+    }
+}
+
+static int worker_main(void* arg) {
+    int k = (int)(intptr_t)arg;
+    uint32_t mine = 0;
+    for (;;) {
+        uint32_t avail = (uint32_t)SDL_GetAtomicInt(&pub_lo);
+        if (avail == mine) {
+            int spins = 0;
+            while ((uint32_t)SDL_GetAtomicInt(&pub_lo) == mine && ++spins < 4000) SDL_CPUPauseInstruction();
+            if ((uint32_t)SDL_GetAtomicInt(&pub_lo) == mine) {
+                SDL_LockMutex(wake_mu);
+                SDL_AddAtomicInt(&sleepers, 1);
+                while ((uint32_t)SDL_GetAtomicInt(&pub_lo) == mine) SDL_WaitConditionTimeout(wake_cv, wake_mu, 5);
+                SDL_AddAtomicInt(&sleepers, -1);
+                SDL_UnlockMutex(wake_mu);
+            }
+            continue;
+        }
+        while (mine != avail) {
+            raster_job(&jobs[mine % JOBS], k, nworkers);
+            mine++;
+            if ((mine & 15) == 0 || mine == avail) SDL_SetAtomicInt(&done[k], (int)mine);
+        }
+    }
+    return 0;
+}
+
+static void raster_init(void) {
+    if (gx_gl_active()) { nworkers = 0; return; }
+    const char* e = getenv("WPR_RASTER_THREADS");
+    int n = e ? atoi(e) : SDL_GetNumLogicalCPUCores() - 2;
+    if (n > 8) n = 8;
+    if (n < 0) n = 0;
+    if (!e && n < 1) n = 1;
+    nworkers = n;
+    if (!n) return;
+    wake_mu = SDL_CreateMutex();
+    wake_cv = SDL_CreateCondition();
+    for (int k = 0; k < n; k++) {
+        SDL_Thread* t = SDL_CreateThread(worker_main, "raster", (void*)(intptr_t)k);
+        if (t) SDL_DetachThread(t);
+    }
+    fprintf(stderr, "[gx] %d raster threads\n", n);
+}
+
+static uint32_t slowest_done(void) {
+    uint32_t lo = (uint32_t)job_w;
+    for (int k = 0; k < nworkers; k++) {
+        uint32_t d = (uint32_t)SDL_GetAtomicInt(&done[k]);
+        if ((uint32_t)job_w - d > (uint32_t)job_w - lo) lo = d;
+    }
+    return lo;
+}
+
+/* Waits until the workers have finished every job before `upto` (a job count). */
+static void wait_jobs(uint64_t upto) {
+    if (job_w - upto >= JOBS) return;  /* older than the ring: already done */
+    int spins = 0;
+    while ((uint32_t)job_w - slowest_done() > (uint32_t)(job_w - upto)) {
+        if (++spins < 2000) SDL_CPUPauseInstruction();
+        else SDL_Delay(0);
+    }
+}
+
+static void raster_drain(void) {
+    if (nworkers > 0) wait_jobs(job_w);
+    gx_gl_flush();
+}
+
+static void publish(void) {
+    SDL_SetAtomicInt(&pub_lo, (int)(uint32_t)job_w);
+    if (SDL_GetAtomicInt(&sleepers)) {
+        SDL_LockMutex(wake_mu);
+        SDL_BroadcastCondition(wake_cv);
+        SDL_UnlockMutex(wake_mu);
+    }
+}
+
+static const RasterState* current_state(void) {
+    if (raster_dirty || cur_state < 0) {
+        int slot = nstate++ % STATES;
+        if (nworkers > 0) wait_jobs(state_last_job[slot]);
+        build_state(&states[slot]);
+        cur_state = slot;
+        raster_dirty = 0;
+    }
+    return &states[cur_state];
+}
+
 void gx_triangle(const GxPipeVertex* v0, const GxPipeVertex* v1, const GxPipeVertex* v2) {
+    if (nworkers < 0) raster_init();
     const GxPipeVertex* v[3] = {v0, v1, v2};
     float sx[3], sy[3], sz[3], iw[3];
     for (int i = 0; i < 3; i++) {
@@ -504,40 +700,44 @@ void gx_triangle(const GxPipeVertex* v0, const GxPipeVertex* v1, const GxPipeVer
     if (miny < cy0) miny = cy0;
     if (maxx > cx1) maxx = cx1;
     if (maxy > cy1) maxy = cy1;
-    int ntex = (int)(g_bp[0x00] & 15);
-    int ncol = (int)((g_bp[0x00] >> 4) & 7);
-    tev_load_regs();
-    for (int y = miny; y < maxy; y++) {
-        for (int x = minx; x < maxx; x++) {
-            float px = x + 0.5f, py = y + 0.5f;
-            float w0 = ((sx[1] - px) * (sy[2] - py) - (sx[2] - px) * (sy[1] - py)) / area;
-            float w1 = ((sx[2] - px) * (sy[0] - py) - (sx[0] - px) * (sy[2] - py)) / area;
-            float w2 = 1.0f - w0 - w1;
-            if (w0 < 0 || w1 < 0 || w2 < 0) continue;
-            float pw = w0 * iw[0] + w1 * iw[1] + w2 * iw[2];
-            float b0 = w0 * iw[0] / pw, b1 = w1 * iw[1] / pw, b2 = w2 * iw[2] / pw;
-            int ras[2][4];
-            for (int ch = 0; ch < 2; ch++)
-                for (int k = 0; k < 4; k++) {
-                    float cv = ch < ncol || ncol == 0 ? b0 * v0->col[ch][k] + b1 * v1->col[ch][k] + b2 * v2->col[ch][k] : 0;
-                    ras[ch][k] = clamp255((int)(cv + 0.5f));
-                }
-            float tc[8][2];
-            for (int t = 0; t < ntex; t++) {
-                float s = b0 * v0->tc[t][0] + b1 * v1->tc[t][0] + b2 * v2->tc[t][0];
-                float tt = b0 * v0->tc[t][1] + b1 * v1->tc[t][1] + b2 * v2->tc[t][1];
-                float q = b0 * v0->tc[t][2] + b1 * v1->tc[t][2] + b2 * v2->tc[t][2];
-                if (q != 0 && q != 1) { s /= q; tt /= q; }
-                tc[t][0] = s; tc[t][1] = tt;
-            }
-            int col[4];
-            tev_shade((const int (*)[4])ras, (const float (*)[2])tc, ntex, col);
-            if (!alpha_test(col[3])) continue;
-            float z = w0 * sz[0] + w1 * sz[1] + w2 * sz[2];
-            write_pixel(x, y, z, col);
-        }
-    }
     g_draw_count++;
+    if (minx >= maxx || miny >= maxy) return;
+
+    const RasterState* rs = current_state();
+    if (nworkers == 0 && gx_gl_active()) {
+        /* the same viewport transform as to_screen, kept linear in clip space so the GPU clips */
+        float wd = xff(0x101A), ht = xff(0x101B), zr = xff(0x101C), xo = xff(0x101D), yo = xff(0x101E), fz = xff(0x101F);
+        float pos[3][4], col[3][2][4], tcs[3][8][3];
+        for (int i = 0; i < 3; i++) {
+            const float* c = v[i]->clip;
+            pos[i][0] = ((xo - 342.0f) / 320.0f - 1.0f) * c[3] + wd / 320.0f * c[0];
+            pos[i][1] = ((yo - 342.0f) / 264.0f - 1.0f) * c[3] + ht / 264.0f * c[1];
+            pos[i][2] = (2.0f * fz / 16777216.0f - 1.0f) * c[3] + 2.0f * zr / 16777216.0f * c[2];
+            pos[i][3] = c[3];
+            memcpy(col[i], v[i]->col, sizeof col[i]);
+            memcpy(tcs[i], v[i]->tc, sizeof tcs[i]);
+        }
+        int sc[4] = {cx0, cy0, cx1, cy1};
+        gx_gl_triangle(rs, sc, (const float (*)[4])pos, (const float (*)[2][4])col, (const float (*)[8][3])tcs);
+        return;
+    }
+    if (nworkers > 0 && job_w >= JOBS) wait_jobs(job_w - JOBS + 1);  /* the slot we are about to reuse */
+    RasterJob* j = &jobs[job_w % JOBS];
+    j->rs = rs;
+    memcpy(j->sx, sx, sizeof sx); memcpy(j->sy, sy, sizeof sy); memcpy(j->sz, sz, sizeof sz); memcpy(j->iw, iw, sizeof iw);
+    /* w0 = ((sx1-px)(sy2-py) - (sx2-px)(sy1-py)) / area, and likewise w1, as linear functions of px, py */
+    float ia = 1.0f / area;
+    j->e0[0] = (sx[1] * sy[2] - sx[2] * sy[1]) * ia; j->e0[1] = (sy[1] - sy[2]) * ia; j->e0[2] = (sx[2] - sx[1]) * ia;
+    j->e1[0] = (sx[2] * sy[0] - sx[0] * sy[2]) * ia; j->e1[1] = (sy[2] - sy[0]) * ia; j->e1[2] = (sx[0] - sx[2]) * ia;
+    j->minx = minx; j->miny = miny; j->maxx = maxx; j->maxy = maxy;
+    for (int i = 0; i < 3; i++) {
+        memcpy(j->col[i], v[i]->col, sizeof j->col[i]);
+        memcpy(j->tc[i], v[i]->tc, sizeof(float) * 3 * (size_t)(rs->ntex > 8 ? 8 : rs->ntex));
+    }
+    if (nworkers == 0) { raster_job(j, 0, 1); job_w++; return; }
+    job_w++;
+    state_last_job[cur_state] = job_w;
+    publish();
 }
 
 /* ------------------------------------------------------------------ EFB copies */
@@ -547,6 +747,7 @@ static uint8_t to_v(int r, int g, int b) { return (uint8_t)clamp255(((112 * r - 
 
 int g_xfb_stride = 1280;
 uint32_t g_xfb_last_addr;
+uint64_t g_xfb_copies;  /* frames the game finished: the fps counter in the title bar */
 
 static void dump_frame(int x0, int y0, int w, int h) {
     static const char* dir;
@@ -621,9 +822,13 @@ static void copy_to_texture(uint32_t trigger, int x0, int y0, int w, int h, uint
 }
 
 void gx_efb_copy(uint32_t trigger) {
+    if (nworkers < 0) raster_init();
+    raster_drain();
     uint32_t src = g_bp[0x49], size = g_bp[0x4A];
     int x0 = (int)(src & 0x3FF), y0 = (int)((src >> 10) & 0x3FF);
     int w = (int)(size & 0x3FF) + 1, h = (int)((size >> 10) & 0x3FF) + 1;
+    int gl = nworkers == 0 && gx_gl_active();
+    if (gl) gx_gl_read_efb(x0, y0, w + 1, h + 1, efb);  /* +1: the box filter of half-size copies reads one more */
     uint32_t dst = (g_bp[0x4B] & 0xFFFFFF) << 5;
     uint32_t stride = (g_bp[0x4D] & 0x3FF) << 5;
     if (trigger & (1u << 14)) {
@@ -649,15 +854,23 @@ void gx_efb_copy(uint32_t trigger) {
         g_xfb_h = lines;
         g_xfb_stride = (int)stride;
         g_xfb_last_addr = dst;
+        g_xfb_copies++;
         dump_frame(x0, y0, w, h);
+        /* a game that never invalidates still gets textures it rewrote in memory picked up each frame */
+        if (!tcache_game_invalidated) gx_invalidate_textures();
+        tcache_game_invalidated = 0;
     } else {
         copy_to_texture(trigger, x0, y0, w, h, dst);
+        invalidate_textures_in(PPC_PHYS(dst | 0x80000000u), PPC_PHYS(dst | 0x80000000u) + (uint32_t)(w * h * 4));
     }
-    gx_invalidate_textures();
     if (trigger & (1u << 11)) {
         uint32_t ar = g_bp[0x4F], gb = g_bp[0x50];
         uint8_t cr = (uint8_t)(ar & 255), ca = (uint8_t)((ar >> 8) & 255), cg = (uint8_t)((gb >> 8) & 255), cb = (uint8_t)(gb & 255);
         float cz = (float)(g_bp[0x51] & 0xFFFFFF);
+        if (gl) {
+            gx_gl_clear(x0, y0, w, h, (const uint8_t[4]){cr, cg, cb, ca}, cz / 16777216.0f);
+            return;
+        }
         for (int y = y0; y < y0 + h && y < EFB_H; y++)
             for (int x = x0; x < x0 + w && x < EFB_W; x++) {
                 efb[y][x][0] = cr; efb[y][x][1] = cg; efb[y][x][2] = cb; efb[y][x][3] = ca;
@@ -671,5 +884,5 @@ void gx_load_tlut(void) {
     uint32_t v = g_bp[0x65];
     uint32_t tm = (v & 0x3FF) << 9, count = ((v >> 10) & 0x7FF) * 16 * 2;
     memcpy(tmem + (tm & 0xFFFFF), g_mem + PPC_PHYS(src | 0x80000000u), count);
-    gx_invalidate_textures();
+    invalidate_textures_in(0, 0);
 }

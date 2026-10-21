@@ -4,10 +4,14 @@
  *   A / Cross  -> A          B / Circle -> B        X -> 1        Y -> 2
  *   Start      -> +          Back       -> -        Guide -> Home
  *   D-pad      -> D-pad      Right stick -> pointer  Left stick -> tilt
- * Player 1 can also use keyboard + mouse.
+ * Every player also has a set of keys (see keysets below and controls.txt); player 1 has the mouse.
  */
 #include <SDL3/SDL.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+#include "gx_gl.h"
 
 #include "runtime.h"
 
@@ -23,6 +27,12 @@ static SDL_Texture* xfb_tex;
 static int xfb_w, xfb_h;
 static SDL_Gamepad* pads[MAX_PLAYERS];
 static HostRemote remotes[MAX_PLAYERS];
+static SDL_Window* gl_window;
+static SDL_GLContext gl_context;
+
+int platform_gl_make_current(void) {
+    return gl_context && SDL_GL_MakeCurrent(gl_window, gl_context);
+}
 
 int platform_init(const char* title, int width, int height) {
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | SDL_INIT_AUDIO)) {
@@ -34,6 +44,17 @@ int platform_init(const char* title, int width, int height) {
         return 0;
     }
     SDL_SetRenderVSync(renderer, 1);
+    platform_set_fps(0);
+    /* the GX renderer's GL context lives on the GPU thread; it draws offscreen, so its window stays hidden */
+    if (!getenv("WPR_RENDERER") || strcmp(getenv("WPR_RENDERER"), "soft") != 0) {
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+        gl_window = SDL_CreateWindow("gx", 64, 64, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
+        if (gl_window) gl_context = SDL_GL_CreateContext(gl_window);
+        if (gl_context) SDL_GL_MakeCurrent(gl_window, NULL);
+        else SDL_Log("no OpenGL 3.3 (%s): using the software renderer", SDL_GetError());
+    }
     SDL_SetRenderLogicalPresentation(renderer, 640, 480, SDL_LOGICAL_PRESENTATION_LETTERBOX);
     return 1;
 }
@@ -60,13 +81,47 @@ static float axis(SDL_Gamepad* g, SDL_GamepadAxis a) {
     return (v > -0.15f && v < 0.15f) ? 0.0f : v;
 }
 
+/* Keyboard players. Player 1 also has the mouse as pointer (left click A, right click B); the
+ * others move a pointer with their direction keys, which press the D-pad at the same time.
+ * F1 turns the direction keys for a Remote held sideways (as most minigames ask). */
+typedef struct {
+    SDL_Scancode up, down, left, right, a, b, one, two, plus, minus, home, shake, a2, b2, ab;
+} KeySet;
+static const KeySet keysets[MAX_PLAYERS] = {
+    {SDL_SCANCODE_UP, SDL_SCANCODE_DOWN, SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT, SDL_SCANCODE_RETURN,
+     SDL_SCANCODE_BACKSPACE, SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_EQUALS, SDL_SCANCODE_MINUS,
+     SDL_SCANCODE_H, SDL_SCANCODE_RSHIFT, SDL_SCANCODE_SPACE, SDL_SCANCODE_RCTRL, SDL_SCANCODE_TAB},
+    {SDL_SCANCODE_W, SDL_SCANCODE_S, SDL_SCANCODE_A, SDL_SCANCODE_D, SDL_SCANCODE_Q, SDL_SCANCODE_E,
+     SDL_SCANCODE_Z, SDL_SCANCODE_X, SDL_SCANCODE_3, SDL_SCANCODE_UNKNOWN, SDL_SCANCODE_UNKNOWN,
+     SDL_SCANCODE_R, SDL_SCANCODE_UNKNOWN, SDL_SCANCODE_UNKNOWN, SDL_SCANCODE_C},
+    {SDL_SCANCODE_I, SDL_SCANCODE_K, SDL_SCANCODE_J, SDL_SCANCODE_L, SDL_SCANCODE_U, SDL_SCANCODE_O,
+     SDL_SCANCODE_N, SDL_SCANCODE_M, SDL_SCANCODE_8, SDL_SCANCODE_UNKNOWN, SDL_SCANCODE_UNKNOWN,
+     SDL_SCANCODE_P, SDL_SCANCODE_UNKNOWN, SDL_SCANCODE_UNKNOWN, SDL_SCANCODE_COMMA},
+    {SDL_SCANCODE_KP_8, SDL_SCANCODE_KP_5, SDL_SCANCODE_KP_4, SDL_SCANCODE_KP_6, SDL_SCANCODE_KP_7,
+     SDL_SCANCODE_KP_9, SDL_SCANCODE_KP_1, SDL_SCANCODE_KP_3, SDL_SCANCODE_KP_PLUS, SDL_SCANCODE_KP_MINUS,
+     SDL_SCANCODE_UNKNOWN, SDL_SCANCODE_KP_0, SDL_SCANCODE_UNKNOWN, SDL_SCANCODE_UNKNOWN, SDL_SCANCODE_KP_2},
+};
+static int sideways;
+static float key_ptr[MAX_PLAYERS][2];
+static uint64_t mouse_moved_ns, last_poll_ns;
+
+static int down(const bool* keys, SDL_Scancode k) { return k != SDL_SCANCODE_UNKNOWN && keys[k]; }
+
 static void poll_input(void) {
     const bool* keys = SDL_GetKeyboardState(NULL);
+    uint64_t now = SDL_GetTicksNS();
+    float dt = last_poll_ns ? (float)(now - last_poll_ns) / 1e9f : 0.0f;
+    if (dt > 0.1f) dt = 0.1f;
+    last_poll_ns = now;
     for (int p = 0; p < MAX_PLAYERS; p++) {
         HostRemote* r = &remotes[p];
         SDL_Gamepad* g = pads[p];
+        const KeySet* k = &keysets[p];
         uint16_t b = 0;
-        r->connected = g != NULL || p == 0;
+        int shake = 0;
+        r->connected = 1;  /* every player can play on the keyboard */
+        r->accel[0] = r->accel[1] = 0.0f;
+        r->accel[2] = 1.0f;
         if (g) {
             static const struct { SDL_GamepadButton sdl; uint16_t wii; } map[] = {
                 {SDL_GAMEPAD_BUTTON_SOUTH, WPAD_A}, {SDL_GAMEPAD_BUTTON_EAST, WPAD_B},
@@ -78,35 +133,82 @@ static void poll_input(void) {
             };
             for (size_t i = 0; i < sizeof map / sizeof map[0]; i++)
                 if (SDL_GetGamepadButton(g, map[i].sdl)) b |= map[i].wii;
-            r->ir_x = axis(g, SDL_GAMEPAD_AXIS_RIGHTX);
-            r->ir_y = axis(g, SDL_GAMEPAD_AXIS_RIGHTY);
+            if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) shake = 1;
             r->accel[0] = axis(g, SDL_GAMEPAD_AXIS_LEFTX);
             r->accel[1] = axis(g, SDL_GAMEPAD_AXIS_LEFTY);
-            r->accel[2] = 1.0f;
         }
+        /* keyboard directions, turned for a sideways Remote (D-pad on the left: screen up = Right) */
+        int ku = down(keys, k->up), kd = down(keys, k->down), kl = down(keys, k->left), kr = down(keys, k->right);
+        if (sideways) {
+            if (ku) b |= WPAD_RIGHT;
+            if (kd) b |= WPAD_LEFT;
+            if (kl) b |= WPAD_UP;
+            if (kr) b |= WPAD_DOWN;
+        } else {
+            if (ku) b |= WPAD_UP;
+            if (kd) b |= WPAD_DOWN;
+            if (kl) b |= WPAD_LEFT;
+            if (kr) b |= WPAD_RIGHT;
+        }
+        if (down(keys, k->a) || down(keys, k->a2)) b |= WPAD_A;
+        if (down(keys, k->b) || down(keys, k->b2)) b |= WPAD_B;
+        if (down(keys, k->ab)) b |= WPAD_A | WPAD_B;
+        if (down(keys, k->one)) b |= WPAD_1;
+        if (down(keys, k->two)) b |= WPAD_2;
+        if (down(keys, k->plus)) b |= WPAD_PLUS;
+        if (down(keys, k->minus)) b |= WPAD_MINUS;
+        if (down(keys, k->home)) b |= WPAD_HOME;
+        if (down(keys, k->shake)) shake = 1;
+        if (shake) {  /* a hard back-and-forth swing */
+            float ph = (float)(now % 125000000ull) / 125000000.0f;
+            r->accel[0] = ph < 0.5f ? 3.0f : -3.0f;
+            r->accel[1] = ph < 0.5f ? -2.5f : 2.5f;
+            r->accel[2] = ph < 0.5f ? 2.0f : -1.0f;
+        }
+
+        /* pointer: mouse (player 1, once it moves), right stick, or the direction keys */
+        float* kp = key_ptr[p];
+        float sp = 1.3f * dt;
+        int mouse_active = p == 0 && mouse_moved_ns && now - mouse_moved_ns < 3000000000ull;
+        if (!sideways && !mouse_active) {
+            kp[0] += (kr - kl) * sp;
+            kp[1] += (kd - ku) * sp;
+        }
+        if (g) {
+            float sx = axis(g, SDL_GAMEPAD_AXIS_RIGHTX), sy = axis(g, SDL_GAMEPAD_AXIS_RIGHTY);
+            kp[0] += sx * sp * 1.5f;
+            kp[1] += sy * sp * 1.5f;
+        }
+        if (kp[0] < -1) kp[0] = -1;
+        if (kp[0] > 1) kp[0] = 1;
+        if (kp[1] < -1) kp[1] = -1;
+        if (kp[1] > 1) kp[1] = 1;
+        r->ir_x = kp[0];
+        r->ir_y = kp[1];
         if (p == 0) {
-            if (keys[SDL_SCANCODE_RETURN] || keys[SDL_SCANCODE_SPACE]) b |= WPAD_A;
-            if (keys[SDL_SCANCODE_BACKSPACE]) b |= WPAD_B;
-            if (keys[SDL_SCANCODE_1]) b |= WPAD_1;
-            if (keys[SDL_SCANCODE_2]) b |= WPAD_2;
-            if (keys[SDL_SCANCODE_EQUALS]) b |= WPAD_PLUS;
-            if (keys[SDL_SCANCODE_MINUS]) b |= WPAD_MINUS;
-            if (keys[SDL_SCANCODE_H]) b |= WPAD_HOME;
-            if (keys[SDL_SCANCODE_UP]) b |= WPAD_UP;
-            if (keys[SDL_SCANCODE_DOWN]) b |= WPAD_DOWN;
-            if (keys[SDL_SCANCODE_LEFT]) b |= WPAD_LEFT;
-            if (keys[SDL_SCANCODE_RIGHT]) b |= WPAD_RIGHT;
-            if (!g) {
-                float mx, my, w = 640, h = 480;
-                SDL_GetMouseState(&mx, &my);
+            float mx, my;
+            SDL_MouseButtonFlags mb = SDL_GetMouseState(&mx, &my);
+            if (mouse_active) {
                 SDL_RenderCoordinatesFromWindow(renderer, mx, my, &mx, &my);
-                r->ir_x = mx / w * 2 - 1;
-                r->ir_y = my / h * 2 - 1;
-                if (SDL_GetMouseState(NULL, NULL) & SDL_BUTTON_LMASK) b |= WPAD_A;
+                r->ir_x = kp[0] = mx / 640.0f * 2 - 1;
+                r->ir_y = kp[1] = my / 480.0f * 2 - 1;
             }
+            if (mb & SDL_BUTTON_LMASK) b |= WPAD_A;
+            if (mb & SDL_BUTTON_RMASK) b |= WPAD_B;
+            if (mb & SDL_BUTTON_MMASK) b |= WPAD_A | WPAD_B;
         }
         r->buttons = b;
     }
+}
+
+/* Title bar: frame rate and how the keyboard directions are turned. fps < 0 keeps the last one. */
+void platform_set_fps(int fps) {
+    static int last;
+    if (fps >= 0) last = fps;
+    char t[160];
+    SDL_snprintf(t, sizeof t, "Wii Party  |  %d fps  |  %s (F1 to change)  |  F11 full screen", last,
+                 sideways ? "Remotes held sideways" : "Remotes pointing at the screen");
+    SDL_SetWindowTitle(window, t);
 }
 
 int platform_pump(void) {
@@ -114,6 +216,15 @@ int platform_pump(void) {
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_EVENT_QUIT) return 0;
         if (e.type == SDL_EVENT_GAMEPAD_ADDED || e.type == SDL_EVENT_GAMEPAD_REMOVED) assign_pads();
+        if (e.type == SDL_EVENT_MOUSE_MOTION || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) mouse_moved_ns = SDL_GetTicksNS();
+        if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) {
+            if (e.key.scancode == SDL_SCANCODE_F1) {
+                sideways = !sideways;
+                platform_set_fps(-1);
+            }
+            if (e.key.scancode == SDL_SCANCODE_F11)
+                SDL_SetWindowFullscreen(window, !(SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN));
+        }
     }
     poll_input();
     return 1;
@@ -136,7 +247,14 @@ void platform_present_xfb(const uint8_t* yuyv, int width, int height, int pitch)
 
 const HostRemote* platform_remote(int player) { return &remotes[player]; }
 
+/* The guest, GPU and timer threads are still running game code here, so SDL is not torn down
+ * under them (SDL_Quit would pull the GL context and audio device away mid-frame): the window
+ * goes, then the process ends. Saves are already on disk, NAND writes are synchronous. */
 void platform_shutdown(void) {
     for (int p = 0; p < MAX_PLAYERS; p++) if (pads[p]) SDL_CloseGamepad(pads[p]);
-    SDL_Quit();
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    fflush(stdout);
+    fflush(stderr);
+    _Exit(0);
 }

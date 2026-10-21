@@ -1,0 +1,38 @@
+Wii Party (native) - controls
+=============================
+
+All four players can play on one keyboard. Gamepads (Xbox, PlayStation, Switch) work too:
+plug one in and it becomes the next free player, on top of that player's keys.
+
+                Player 1          Player 2     Player 3     Player 4 (numpad)
+  Up/Down/      Arrow keys        W A S D      I J K L      8 4 5 6
+  Left/Right
+  A             Enter, Space,     Q            U            7
+                left mouse click
+  B             Backspace,        E            O            9
+                Right Ctrl,
+                right mouse click
+  A+B together  Tab,              C            ,            2
+                middle mouse click
+  1             1                 Z            N            1
+  2             2                 X            M            3
+  +             =                 3            8            +
+  -             -                                           -
+  HOME          H
+  Shake         Right Shift       R            P            0
+
+Pointer
+  Player 1 points with the mouse. Every player can also move their pointer with their
+  direction keys (player 1 with the arrow keys once the mouse has been still for 3 seconds).
+
+F1   Switches the direction keys between "pointing at the screen" and "Remote held sideways".
+     Most minigames hold the Remote sideways; press F1 when up/down/left/right feel turned.
+     The title bar shows which mode is on.
+F11  Full screen on/off.
+
+Gamepad
+  A / Cross = A, B / Circle = B, X = 1, Y = 2, Start = +, Back = -, Guide = HOME,
+  D-pad = D-pad, right stick = pointer, left stick = tilt, left shoulder = shake,
+  right shoulder = B.
+
+The title bar also shows the frame rate.
