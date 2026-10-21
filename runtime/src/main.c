@@ -14,6 +14,27 @@
 #include "ppc_context.h"
 #include "runtime.h"
 
+#ifdef _WIN32
+#include <windows.h>
+/* Write where a crash happened to log.txt; the offsets are matched to symbols with the build's map. */
+static LONG WINAPI crash_filter(EXCEPTION_POINTERS* ep) {
+    uintptr_t base = (uintptr_t)GetModuleHandleA(NULL);
+    EXCEPTION_RECORD* er = ep->ExceptionRecord;
+    fprintf(stderr, "[crash] code %08lX at +%llX", er->ExceptionCode,
+            (unsigned long long)((uintptr_t)er->ExceptionAddress - base));
+    if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2)
+        fprintf(stderr, " (%s %llX)", er->ExceptionInformation[0] ? "write" : "read",
+                (unsigned long long)er->ExceptionInformation[1]);
+    fprintf(stderr, "\n[crash] stack");
+    void* frames[48];
+    USHORT n = RtlCaptureStackBackTrace(0, 48, frames, NULL);
+    for (USHORT i = 0; i < n; i++) fprintf(stderr, " +%llX", (unsigned long long)((uintptr_t)frames[i] - base));
+    fprintf(stderr, "\n");
+    fflush(stderr);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
 extern const uint32_t g_recomp_entry;
 extern const unsigned g_recomp_func_count;
 extern uint64_t g_timebase;
@@ -67,6 +88,9 @@ static void selftest_frame(uint8_t* yuyv, int w, int h, int frame) {
 
 int main(int argc, char** argv) {
     int selftest = argc < 2 || strcmp(argv[1], "--selftest") == 0;
+#ifdef _WIN32
+    SetUnhandledExceptionFilter(crash_filter);
+#endif
     if (!platform_init("Wii Party (native)", 1280, 960)) return 1;
 
     uint32_t entry = 0;
