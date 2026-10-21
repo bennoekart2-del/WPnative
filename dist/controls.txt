@@ -14,7 +14,8 @@ Player 1: keyboard and mouse (every key can be changed in the launcher)
   Shake                    Middle click or Left Shift
   Swing up / down          Mouse wheel, T / G
   Tilt forward / back      R / F
-  Upright or sideways grip Tab (F1 also works)
+  Turn left / right        Q / E
+  Upright or sideways grip F1
 
 Players 2-4: gamepad
   A / Cross = A, B / Circle = B, X = 1, Y = 2, Start = +, Back = -, Guide = HOME,

@@ -15,7 +15,8 @@ $actions = @(
     @('A', 'A', 'Return'), @('A2', 'A (2nd key)', 'Space'), @('B', 'B', 'Backspace'), @('1', '1', '1'), @('2', '2', '2'),
     @('PLUS', '+', '='), @('MINUS', '-', '-'), @('HOME', 'HOME', 'H'), @('SHAKE', 'Shake', 'Left Shift'),
     @('SWINGUP', 'Swing up', 'T'), @('SWINGDOWN', 'Swing down', 'G'), @('TILTFWD', 'Tilt forward', 'R'),
-    @('TILTBACK', 'Tilt back', 'F'), @('GRIP', 'Upright / sideways', 'Tab')
+    @('TILTBACK', 'Tilt back', 'F'), @('TILTLEFT', 'Turn left', 'Q'), @('TILTRIGHT', 'Turn right', 'E'),
+    @('GRIP', 'Upright / sideways', 'F1')
 )
 
 $cfg = @{ disc = ''; scale = 'Auto'; aspect = '16:9'; fullscreen = '0'; sideways = '0' }
@@ -111,7 +112,7 @@ $full.Text = 'Start in full screen (F11 switches)'; $full.Location = New-Object 
 $full.Checked = $cfg.fullscreen -eq '1'; $form.Controls.Add($full)
 $y += 30
 $side = New-Object System.Windows.Forms.CheckBox
-$side.Text = 'Start with the Remote held sideways (Tab switches)'; $side.Location = New-Object System.Drawing.Point(180, $y); $side.Size = New-Object System.Drawing.Size(324, 24)
+$side.Text = 'Start with the Remote held sideways (F1 switches)'; $side.Location = New-Object System.Drawing.Point(180, $y); $side.Size = New-Object System.Drawing.Size(324, 24)
 $side.Checked = $cfg.sideways -eq '1'; $form.Controls.Add($side)
 
 $y += 40

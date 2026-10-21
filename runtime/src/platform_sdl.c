@@ -129,11 +129,11 @@ static float axis(SDL_Gamepad* g, SDL_GamepadAxis a) {
 
 /* One player per device: the keyboard and mouse are player 1 (mouse pointer, left click A, right
  * click B; the arrow keys also move the pointer and press the D-pad), each gamepad is one more player.
- * Tab (or F1) turns the direction keys for a Remote held sideways (as most minigames ask). */
+ * F1 turns the direction keys for a Remote held sideways (as most minigames ask). */
 typedef struct {
     SDL_Scancode up, down, left, right, a, b, one, two, plus, minus, home, shake, a2, b2, ab;
     SDL_Scancode up2, down2, left2, right2, shake2, plus2, minus2;
-    SDL_Scancode grip, swing_up, swing_down, tilt_fwd, tilt_back;
+    SDL_Scancode grip, swing_up, swing_down, tilt_fwd, tilt_back, tilt_left, tilt_right;
 } KeySet;
 static KeySet p1_keys = {
     .up = SDL_SCANCODE_UP, .down = SDL_SCANCODE_DOWN, .left = SDL_SCANCODE_LEFT, .right = SDL_SCANCODE_RIGHT,
@@ -141,8 +141,9 @@ static KeySet p1_keys = {
     .a = SDL_SCANCODE_RETURN, .a2 = SDL_SCANCODE_SPACE, .b = SDL_SCANCODE_BACKSPACE, .b2 = SDL_SCANCODE_RCTRL,
     .one = SDL_SCANCODE_1, .two = SDL_SCANCODE_2, .plus = SDL_SCANCODE_EQUALS, .plus2 = SDL_SCANCODE_KP_PLUS,
     .minus = SDL_SCANCODE_MINUS, .minus2 = SDL_SCANCODE_KP_MINUS, .home = SDL_SCANCODE_H,
-    .shake = SDL_SCANCODE_LSHIFT, .shake2 = SDL_SCANCODE_RSHIFT, .grip = SDL_SCANCODE_TAB,
-    .swing_up = SDL_SCANCODE_T, .swing_down = SDL_SCANCODE_G, .tilt_fwd = SDL_SCANCODE_R, .tilt_back = SDL_SCANCODE_F};
+    .shake = SDL_SCANCODE_LSHIFT, .shake2 = SDL_SCANCODE_RSHIFT, .grip = SDL_SCANCODE_F1,
+    .swing_up = SDL_SCANCODE_T, .swing_down = SDL_SCANCODE_G, .tilt_fwd = SDL_SCANCODE_R, .tilt_back = SDL_SCANCODE_F,
+    .tilt_left = SDL_SCANCODE_Q, .tilt_right = SDL_SCANCODE_E};
 static uint64_t wheel_up_until, wheel_down_until;  /* a mouse-wheel notch swings the Remote for a moment */
 static const KeySet no_keys = {SDL_SCANCODE_UNKNOWN};
 static float key_ptr[MAX_PLAYERS][2];
@@ -160,6 +161,7 @@ static void load_key_overrides(void) {
         {"RIGHT2", offsetof(KeySet, right2)}, {"SHAKE2", offsetof(KeySet, shake2)}, {"GRIP", offsetof(KeySet, grip)},
         {"SWINGUP", offsetof(KeySet, swing_up)}, {"SWINGDOWN", offsetof(KeySet, swing_down)},
         {"TILTFWD", offsetof(KeySet, tilt_fwd)}, {"TILTBACK", offsetof(KeySet, tilt_back)},
+        {"TILTLEFT", offsetof(KeySet, tilt_left)}, {"TILTRIGHT", offsetof(KeySet, tilt_right)},
     };
     for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
         char var[32];
@@ -242,6 +244,8 @@ static void poll_input(void) {
         /* tilt forward / back (R / F), swing up / down (T / G or the mouse wheel) */
         if (down(keys, k->tilt_fwd)) r->accel[2] += 0.7f;
         if (down(keys, k->tilt_back)) r->accel[2] -= 0.7f;
+        if (down(keys, k->tilt_left)) r->accel[0] -= 0.7f;   /* turn the Remote left / right (Q / E) */
+        if (down(keys, k->tilt_right)) r->accel[0] += 0.7f;
         if (down(keys, k->swing_up) || (p == 0 && now < wheel_up_until)) r->accel[1] += 3.0f;
         if (down(keys, k->swing_down) || (p == 0 && now < wheel_down_until)) r->accel[1] -= 3.0f;
         if (shake) {  /* a hard back-and-forth swing */
@@ -294,7 +298,7 @@ void platform_set_fps(int fps) {
     static int last;
     if (fps >= 0) last = fps;
     char t[160];
-    SDL_snprintf(t, sizeof t, "Wii Party  |  %d fps  |  %s (Tab to change)  |  F11 full screen", last,
+    SDL_snprintf(t, sizeof t, "Wii Party  |  %d fps  |  %s (F1 to change)  |  F11 full screen", last,
                  sideways ? "Remotes held sideways" : "Remotes pointing at the screen");
     SDL_SetWindowTitle(window, t);
 }
