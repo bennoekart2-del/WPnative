@@ -7,6 +7,7 @@
  * One player per device: the keyboard and mouse are player 1, each gamepad is the next player (2-4).
  */
 #include <SDL3/SDL.h>
+#include <math.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -147,6 +148,7 @@ static KeySet p1_keys = {
 static uint64_t wheel_up_until, wheel_down_until;  /* a mouse-wheel notch swings the Remote for a moment */
 static const KeySet no_keys = {SDL_SCANCODE_UNKNOWN};
 static float key_ptr[MAX_PLAYERS][2];
+static float tilt[MAX_PLAYERS][2];  /* current turn and lean angles, radians */
 static uint64_t mouse_moved_ns, last_poll_ns;
 
 /* The launcher rebinds player 1's keys with WPR_KEY_<NAME>=<SDL key name>, e.g. WPR_KEY_A=Space. */
@@ -189,8 +191,7 @@ static void poll_input(void) {
         uint16_t b = 0;
         int shake = 0;
         r->connected = p == 0 || g;
-        r->accel[0] = r->accel[1] = 0.0f;
-        r->accel[2] = 1.0f;
+        float turn = 0.0f, lean = 0.0f;  /* wanted tilt, -1..1: turn left/right, lean forward/back */
         if (g) {
             static const struct { SDL_GamepadButton sdl; uint16_t wii; } map[] = {
                 {SDL_GAMEPAD_BUTTON_SOUTH, WPAD_A}, {SDL_GAMEPAD_BUTTON_EAST, WPAD_B},
@@ -203,8 +204,8 @@ static void poll_input(void) {
             for (size_t i = 0; i < sizeof map / sizeof map[0]; i++)
                 if (SDL_GetGamepadButton(g, map[i].sdl)) b |= map[i].wii;
             if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) shake = 1;
-            r->accel[0] = axis(g, SDL_GAMEPAD_AXIS_LEFTX);
-            r->accel[1] = axis(g, SDL_GAMEPAD_AXIS_LEFTY);
+            turn = axis(g, SDL_GAMEPAD_AXIS_LEFTX);
+            lean = -axis(g, SDL_GAMEPAD_AXIS_LEFTY);
         }
         /* keyboard directions, turned for a sideways Remote (D-pad on the left: screen up = Right) */
         int ku = down(keys, k->up), kd = down(keys, k->down), kl = down(keys, k->left), kr = down(keys, k->right);
@@ -242,17 +243,34 @@ static void poll_input(void) {
         if (down(keys, k->shake) || down(keys, k->shake2)) shake = 1;
         if (p == 0 && (SDL_GetMouseState(NULL, NULL) & SDL_BUTTON_MMASK)) shake = 1;
         /* tilt forward / back (R / F), swing up / down (T / G or the mouse wheel) */
-        if (down(keys, k->tilt_fwd)) r->accel[2] += 0.7f;
-        if (down(keys, k->tilt_back)) r->accel[2] -= 0.7f;
-        if (down(keys, k->tilt_left)) r->accel[0] -= 0.7f;   /* turn the Remote left / right (Q / E) */
-        if (down(keys, k->tilt_right)) r->accel[0] += 0.7f;
+        if (down(keys, k->tilt_left)) turn = -1.0f;   /* Q / E */
+        if (down(keys, k->tilt_right)) turn = 1.0f;
+        if (down(keys, k->tilt_fwd)) lean = 1.0f;     /* R / F */
+        if (down(keys, k->tilt_back)) lean = -1.0f;
+        /* The Remote turns smoothly towards the wanted angle (up to 60 degrees) and back to level
+         * when let go, like a hand would. acc is the gravity reaction in KPAD axes: x across
+         * the face, y out of the buttons (-1 when level), z along the Remote. Held upright, turning
+         * left/right rolls it around its length (x); held sideways, its length lies left-right, so
+         * turning like a steering wheel moves gravity onto z and leaning moves it onto x. */
+        float* ang = tilt[p];
+        float step = 4.0f * dt;
+        float want[2] = {turn * 1.05f, lean * 1.05f};
+        for (int i = 0; i < 2; i++) {
+            float d = want[i] - ang[i];
+            ang[i] += d > step ? step : d < -step ? -step : d;
+        }
+        float a_turn = ang[0], a_lean = ang[1];
+        float across = sinf(sideways ? a_lean : a_turn), along = sinf(sideways ? -a_turn : -a_lean);
+        r->accel[0] = across;
+        r->accel[2] = along;
+        r->accel[1] = -sqrtf(fmaxf(0.0f, 1.0f - across * across - along * along));
         if (down(keys, k->swing_up) || (p == 0 && now < wheel_up_until)) r->accel[1] += 3.0f;
         if (down(keys, k->swing_down) || (p == 0 && now < wheel_down_until)) r->accel[1] -= 3.0f;
         if (shake) {  /* a hard back-and-forth swing */
             float ph = (float)(now % 66666667ull) / 66666667.0f;
             r->accel[0] = ph < 0.5f ? 3.0f : -3.0f;
-            r->accel[1] = ph < 0.5f ? -2.5f : 2.5f;
-            r->accel[2] = ph < 0.5f ? 2.0f : -1.0f;
+            r->accel[1] = ph < 0.5f ? -3.5f : 1.5f;
+            r->accel[2] = ph < 0.5f ? 1.0f : -2.0f;
         }
 
         /* pointer: mouse (player 1, once it moves), right stick, or the direction keys */

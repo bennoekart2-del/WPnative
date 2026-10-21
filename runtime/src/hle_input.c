@@ -118,7 +118,7 @@ void hle_KPADReadEx(PPCContext* c) {
     mem_w32(buf + 0x04, hold & ~old);
     mem_w32(buf + 0x08, old & ~hold);
     /* held level and still: gravity along -y; the left stick tilts */
-    float ax = r->accel[0], ay = -1.0f + r->accel[1], az = r->accel[2] - 1.0f;
+    float ax = r->accel[0], ay = r->accel[1], az = r->accel[2];
     float dx = ax - prev[chan].acc[0], dy = ay - prev[chan].acc[1], dz = az - prev[chan].acc[2];
     mem_wf32(buf + 0x0C, ax);
     mem_wf32(buf + 0x10, ay);
@@ -131,9 +131,12 @@ void hle_KPADReadEx(PPCContext* c) {
     mem_wf32(buf + 0x28, vx);
     mem_wf32(buf + 0x2C, vy);
     mem_wf32(buf + 0x30, sqrtf(vx * vx + vy * vy));
-    mem_wf32(buf + 0x34, 1.0f);   /* horizon: no roll */
+    float lv = sqrtf(ay * ay + az * az), lh = sqrtf(ay * ay + ax * ax);
+    mem_wf32(buf + 0x34, lh > 0 ? -ay / lh : 1.0f);   /* horizon: the roll around the Remote */
+    mem_wf32(buf + 0x38, lh > 0 ? ax / lh : 0.0f);
     mem_wf32(buf + 0x48, 1.5f);   /* distance to the sensor bar, metres */
-    mem_wf32(buf + 0x54, 1.0f);
+    mem_wf32(buf + 0x54, lv > 0 ? -ay / lv : 1.0f);   /* acc_vertical: the tilt along the Remote */
+    mem_wf32(buf + 0x58, lv > 0 ? az / lv : 0.0f);
     mem_w8(buf + 0x5C, WPAD_DEV_CORE);
     mem_w8(buf + 0x5D, WPAD_ERR_NONE);
     mem_w8(buf + 0x5E, 2);        /* both sensor bar dots visible */

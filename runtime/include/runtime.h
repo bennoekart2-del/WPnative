@@ -13,7 +13,7 @@ typedef struct {
     int connected;
     uint16_t buttons;      /* Wii Remote button bits (WPAD_BUTTON_*), as the game reads them */
     float ir_x, ir_y;      /* pointer position, -1..1, driven by the right stick or mouse */
-    float accel[3];        /* tilt, driven by the left stick */
+    float accel[3];        /* KPAD acceleration in g: (0,-1,0) held level and still */
 } HostRemote;
 
 int platform_init(const char* title, int width, int height);
