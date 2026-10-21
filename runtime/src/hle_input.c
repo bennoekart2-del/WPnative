@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "ppc_context.h"
+#include "netplay.h"
 #include "runtime.h"
 
 #define KPAD_STATUS_SIZE 0xF0
@@ -39,11 +40,10 @@ static uint16_t key_bit(char k) {
     }
 }
 
-static uint16_t scripted_buttons(int chan) {
+static uint16_t scripted_buttons(int chan, unsigned n) {
     const char* s = getenv("WPR_PRESS");
     if (!s || chan != 0) return 0;
     uint16_t b = 0;
-    unsigned n = reads[0];
     while (*s) {
         uint16_t keys = 0;
         while (*s && *s != ':') keys |= key_bit(*s++);
@@ -59,7 +59,7 @@ static uint16_t scripted_buttons(int chan) {
 }
 
 /* WPR_POINT="0.2,-0.4@900;-0.5,0@1200" puts player 1's pointer at x,y (-1..1) from a read count on. */
-static int scripted_pointer(int chan, float* x, float* y) {
+static int scripted_pointer(int chan, unsigned n, float* x, float* y) {
     const char* s = getenv("WPR_POINT");
     if (!s || chan != 0) return 0;
     int hit = 0;
@@ -70,7 +70,7 @@ static int scripted_pointer(int chan, float* x, float* y) {
         float py = strtof(end + 1, &end);
         if (*end != '@') break;
         unsigned at = (unsigned)strtoul(end + 1, &end, 10);
-        if (reads[0] >= at) { *x = px; *y = py; hit = 1; }
+        if (n >= at) { *x = px; *y = py; hit = 1; }
         s = end;
         if (*s != ';') break;
         s++;
@@ -78,8 +78,18 @@ static int scripted_pointer(int chan, float* x, float* y) {
     return hit;
 }
 
+/* What player chan is doing: in an online game, the input every player agreed on for this frame. */
+static const HostRemote* remote(int chan) { return net_active() ? net_remote(chan) : platform_remote(chan); }
+
 static int connected(int chan) {
-    return chan >= 0 && chan < MAX_PLAYERS && platform_remote(chan)->connected;
+    return chan >= 0 && chan < MAX_PLAYERS && remote(chan)->connected;
+}
+
+/* Netplay (netplay.c): one of this PC's devices, with the test script applied by frame. */
+void hle_input_sample(int dev, uint32_t count, HostRemote* out) {
+    *out = *platform_remote(dev);
+    out->buttons |= scripted_buttons(dev, count);
+    scripted_pointer(dev, count, &out->ir_x, &out->ir_y);
 }
 
 /* s32 WPADProbe(s32 chan, u32* type) */
@@ -106,11 +116,11 @@ void hle_KPADReadEx(PPCContext* c) {
     reads[chan]++;
     if (chan == 0 && getenv("WPR_TRACE_INPUT") && reads[0] % 200 == 0)
         fprintf(stderr, "[input] read %u (lr %08X)\n", reads[0], c->lr);
-    const HostRemote* r = platform_remote(chan);
-    uint16_t hold = r->buttons | scripted_buttons(chan);
+    const HostRemote* r = remote(chan);
+    uint16_t hold = r->buttons | (net_active() ? 0 : scripted_buttons(chan, reads[0]));
     uint16_t old = prev[chan].hold;
     float px = r->ir_x, py = r->ir_y;
-    scripted_pointer(chan, &px, &py);
+    if (!net_active()) scripted_pointer(chan, reads[0], &px, &py);
     float vx = px - prev[chan].pos[0], vy = py - prev[chan].pos[1];
 
     for (uint32_t i = 0; i < KPAD_STATUS_SIZE; i += 4) mem_w32(buf + i, 0);

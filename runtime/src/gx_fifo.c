@@ -18,6 +18,7 @@
 #include "gx.h"
 #include "gx_internal.h"
 #include "ppc_context.h"
+#include "det.h"
 
 static uint8_t fifo[1 << 20];
 static size_t fifo_len;
@@ -311,6 +312,7 @@ static SDL_AtomicInt ring_w, ring_r;  /* free-running byte counters */
 static SDL_Semaphore* gpu_wake;
 static SDL_AtomicInt gpu_sleeping;
 static int gpu_sync = -1;
+static SDL_AtomicInt gpu_done;  /* ring_r once the commands up to it have been carried out */
 
 static void consume(void) {
     size_t used = decode(fifo, fifo_len, 0);
@@ -338,6 +340,7 @@ static int gpu_main(void* arg) {
         }
         SDL_SetAtomicInt(&ring_r, (int)r);
         consume();
+        SDL_SetAtomicInt(&gpu_done, (int)r);
     }
     return 0;
 }
@@ -426,16 +429,45 @@ static void pe_update_irq(void) {
     if ((pe_isr & 2) && (pe_isr & 8)) irq_raise(PI_CAUSE_PE_FINISH); else irq_clear(PI_CAUSE_PE_FINISH);
 }
 
-void gx_pe_event(int reg, uint32_t v) {
-    SDL_LockSpinlock(&pe_lock);
+/* Deterministic mode: PE events from the GPU thread wait here until the guest reaches a fixed
+ * point (gx_det_sync), so the interrupt lands at the same place in the game's code every run. */
+static struct { int reg; uint32_t v; } pe_queue[1024];
+static int pe_queued;
+
+static void pe_apply(int reg, uint32_t v) {
     if (reg == 0x45) pe_isr |= 8;
     else { pe_token = (uint16_t)v; if (reg == 0x47) pe_isr |= 4; }
     pe_update_irq();
+}
+
+void gx_det_sync(void) {
+    if (gpu_sync > 0) return;
+    while (SDL_GetAtomicInt(&gpu_done) != SDL_GetAtomicInt(&ring_w)) SDL_Delay(0);
+    SDL_LockSpinlock(&pe_lock);
+    for (int i = 0; i < pe_queued; i++) pe_apply(pe_queue[i].reg, pe_queue[i].v);
+    pe_queued = 0;
+    SDL_UnlockSpinlock(&pe_lock);
+}
+
+void gx_pe_event(int reg, uint32_t v) {
+    SDL_LockSpinlock(&pe_lock);
+    if (g_det && gpu_sync == 0) {
+        if (pe_queued == 1024) {  /* cannot happen with a game that waits for its tokens; keep the latest */
+            memmove(pe_queue, pe_queue + 1, sizeof pe_queue - sizeof pe_queue[0]);
+            pe_queued--;
+        }
+        pe_queue[pe_queued].reg = reg;
+        pe_queue[pe_queued++].v = v;
+        SDL_UnlockSpinlock(&pe_lock);
+        return;
+    }
+    pe_apply(reg, v);
     SDL_UnlockSpinlock(&pe_lock);
 }
 
 uint32_t gx_pe_read(uint32_t addr, int size) {
     (void)size;
+    if (g_det) gx_det_sync();
     switch (addr & 0xFF) {
     case 0x0A: return pe_isr;
     case 0x0E: return pe_token;

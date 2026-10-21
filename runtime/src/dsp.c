@@ -26,6 +26,7 @@
 #include <SDL3/SDL_timer.h>
 
 #include "ppc_context.h"
+#include "det.h"
 #include "runtime.h"
 
 void irq_raise(uint32_t cause);
@@ -554,6 +555,10 @@ void audio_play_ai(const uint8_t* samples, uint32_t bytes, uint32_t rate);  /* p
 /* Called from the timer thread: each AI DMA block "starts" one period after the last, which
  * is when the hardware latches the start address and length, raises AIDINT and the game
  * queues the next buffer. The latched buffer (s16 pairs, right first, big endian) is played. */
+uint64_t dsp_ai_next(void) {
+    return SDL_GetAtomicInt(&aid_running) && (regs[0x36 / 2] & 0x7FFF) ? aid_next_ns : UINT64_MAX;
+}
+
 void dsp_ai_tick(uint64_t now) {
     if (!SDL_GetAtomicInt(&aid_running)) return;
     uint32_t blocks = regs[0x36 / 2] & 0x7FFF;
@@ -615,7 +620,7 @@ static void write16(uint32_t r, uint16_t v) {
         return;
     case 0x36 / 2: {
         int run = (v & 0x8000) != 0;
-        if (run && !(regs[r] & 0x8000)) aid_next_ns = SDL_GetTicksNS();
+        if (run && !(regs[r] & 0x8000)) aid_next_ns = det_now_ns();
         regs[r] = v;
         SDL_SetAtomicInt(&aid_running, run);
         return;

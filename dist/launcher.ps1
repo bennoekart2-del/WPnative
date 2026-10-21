@@ -26,7 +26,8 @@ $actions = @(
     @('GRIP', 'Upright / sideways', 'F1')
 )
 
-$cfg = @{ disc = ''; scale = 'Auto'; aspect = '16:9'; fullscreen = '1'; sideways = '0' }
+$cfg = @{ disc = ''; scale = 'Auto'; aspect = '16:9'; fullscreen = '1'; sideways = '0'
+         name = $env:USERNAME; local = '0'; friends = '1'; port = '47123'; join = '' }
 foreach ($a in $actions) { $cfg['key_' + $a[0]] = $a[2] }
 if (Test-Path $ini) {
     foreach ($line in Get-Content $ini) {
@@ -275,31 +276,78 @@ $form.Add_KeyDown({
     $e.Handled = $true; $e.SuppressKeyPress = $true
 })
 
-# ---- Online tab: friends join over the internet with Parsec (their gamepad becomes player 2, 3 or 4 here)
+# ---- Online tab: everyone runs the game; the host's game and the friends' games swap only controller input
 $tOnline = New-Tab 'Online'
-Add-Label $tOnline 'Play online with friends' 16 12 520 30 $bold | Out-Null
-$onlineText = New-Object System.Windows.Forms.TextBox
-$onlineText.Multiline = $true; $onlineText.ReadOnly = $true; $onlineText.ScrollBars = 'Vertical'; $onlineText.BackColor = [System.Drawing.Color]::White
-$onlineText.Location = New-Object System.Drawing.Point(16, 48); $onlineText.Size = New-Object System.Drawing.Size(520, 390)
-$onlineText.Text = ("One person (the host) runs the game. Friends watch the host's screen and play with their own gamepad through Parsec, a free program. Friends don't need the game.`r`n`r`n" +
-    "THE HOST (the PC with the game)`r`n" +
-    "1. Install Parsec (button below) and make a free account.`r`n" +
-    "2. Add your friends in Parsec (Friends > Add).`r`n" +
-    "3. Wait until your friends have joined, then press PLAY in this launcher.`r`n" +
-    "4. When a friend joins, Parsec asks you to accept. Give them gamepad permission only, so they can't use your keyboard and mouse.`r`n`r`n" +
-    "FRIENDS`r`n" +
-    "1. Install Parsec and make a free account.`r`n" +
-    "2. Plug in a gamepad (Xbox, PlayStation or Switch).`r`n" +
-    "3. In Parsec, find the host's computer and press Connect.`r`n`r`n" +
-    "WHO IS WHICH PLAYER`r`n" +
-    "The host is player 1 (keyboard and mouse). Each friend's gamepad becomes player 2, 3 or 4, in the order they joined.`r`n`r`n" +
-    "TIPS`r`n" +
-    "- Friends should join before the host presses PLAY.`r`n" +
-    "- Laggy? On the Settings tab, pick a lower picture quality.")
-$onlineText.Select(0, 0)
-$tOnline.Controls.Add($onlineText)
-$parsecBtn = Add-Button $tOnline 'Get Parsec (free)' 16 448 200 36
+Add-Label $tOnline 'Play online with friends' 16 10 520 26 $bold | Out-Null
+Add-Label $tOnline "Everyone needs Wii Party on their own PC: their own disc and this same version of the game. One person hosts, the others join." 16 36 520 40 | Out-Null
+Add-Label $tOnline 'Your name' 16 84 140 | Out-Null
+$netName = New-Object System.Windows.Forms.TextBox
+$netName.Location = New-Object System.Drawing.Point(160, 80); $netName.Size = New-Object System.Drawing.Size(200, 26); $netName.Text = $cfg.name
+$tOnline.Controls.Add($netName)
+Add-Label $tOnline 'Players on this PC' 16 116 140 | Out-Null
+$netLocal = New-Object System.Windows.Forms.ComboBox
+$netLocal.DropDownStyle = 'DropDownList'; $netLocal.Location = New-Object System.Drawing.Point(160, 112); $netLocal.Size = New-Object System.Drawing.Size(360, 26)
+$localChoices = @(@('0', '1 player: keyboard and mouse'), @('1', '1 player: gamepad'), @('0,1', '2 players: keyboard and mouse + 1 gamepad'),
+    @('1,2', '2 players: 2 gamepads'), @('0,1,2', '3 players'), @('0,1,2,3', '4 players'))
+foreach ($c in $localChoices) { [void]$netLocal.Items.Add($c[1]) }
+$netLocal.SelectedIndex = [Math]::Max(0, [Array]::IndexOf(@($localChoices | ForEach-Object { $_[0] }), $cfg.local))
+$tOnline.Controls.Add($netLocal)
+
+Add-Label $tOnline 'Host a game' 16 152 300 24 $bold | Out-Null
+Add-Label $tOnline 'Friends joining' 16 182 140 | Out-Null
+$netFriends = New-Object System.Windows.Forms.ComboBox
+$netFriends.DropDownStyle = 'DropDownList'; $netFriends.Location = New-Object System.Drawing.Point(160, 178); $netFriends.Size = New-Object System.Drawing.Size(60, 26)
+foreach ($n in 1..3) { [void]$netFriends.Items.Add([string]$n) }
+$netFriends.SelectedIndex = [Math]::Max(0, [Math]::Min(2, [int]$cfg.friends - 1))
+$tOnline.Controls.Add($netFriends)
+Add-Label $tOnline 'Port' 250 182 40 | Out-Null
+$netPort = New-Object System.Windows.Forms.TextBox
+$netPort.Location = New-Object System.Drawing.Point(292, 178); $netPort.Size = New-Object System.Drawing.Size(70, 26); $netPort.Text = $cfg.port
+$tOnline.Controls.Add($netPort)
+$hostBtn = Add-Button $tOnline 'HOST' 380 174 140 34
+$hostInfo = Add-Label $tOnline '' 16 214 400 40
+$copyBtn = Add-Button $tOnline 'Copy' 430 216 90 30
+$copyBtn.Visible = $false
+
+Add-Label $tOnline "Join a friend's game" 16 262 300 24 $bold | Out-Null
+Add-Label $tOnline "Host's address" 16 292 140 | Out-Null
+$netJoin = New-Object System.Windows.Forms.TextBox
+$netJoin.Location = New-Object System.Drawing.Point(160, 288); $netJoin.Size = New-Object System.Drawing.Size(202, 26); $netJoin.Text = $cfg.join
+$tOnline.Controls.Add($netJoin)
+$joinBtn = Add-Button $tOnline 'JOIN' 380 284 140 34
+
+$netHelp = New-Object System.Windows.Forms.TextBox
+$netHelp.Multiline = $true; $netHelp.ReadOnly = $true; $netHelp.ScrollBars = 'Vertical'; $netHelp.BackColor = [System.Drawing.Color]::White
+$netHelp.Location = New-Object System.Drawing.Point(16, 330); $netHelp.Size = New-Object System.Drawing.Size(504, 140)
+$netHelp.Text = ("HOW IT WORKS`r`n" +
+    "1. The host picks how many friends join and presses HOST. The game window opens and waits for them.`r`n" +
+    "2. The host sends the address shown here to the friends (press Copy).`r`n" +
+    "3. Each friend types that address and presses JOIN. When everyone is in, the game starts on all PCs.`r`n" +
+    "The host's Miis and saves are used by everyone. Saves only change on the host's PC.`r`n`r`n" +
+    "CAN'T CONNECT?`r`n" +
+    "- If Windows asks about the firewall when you host, press Allow.`r`n" +
+    "- The host's router has to let friends in. The launcher asks the router to open the port by itself (UPnP). If that doesn't work, open TCP port 47123 to the host's PC in the router settings (search for 'port forwarding' with your router's name).`r`n" +
+    "- Or: everyone installs a free 'virtual LAN' program such as Radmin VPN or ZeroTier, joins the same network, and friends type the host's address from that program.`r`n" +
+    "- 'Different version': everyone needs the same game version and a Wii Party disc from the same region.`r`n`r`n" +
+    "FRIEND WITHOUT THE GAME?`r`n" +
+    "They can still play on the host's PC through Parsec (free): it turns their gamepad into a controller on the host's PC. Press 'Get Parsec' below.")
+$tOnline.Controls.Add($netHelp)
+$parsecBtn = Add-Button $tOnline 'Get Parsec' 16 478 120 30
 $parsecBtn.Add_Click({ Start-Process 'https://parsec.app/downloads' })
+$copyBtn.Add_Click({ if ($script:shareAddress) { [System.Windows.Forms.Clipboard]::SetText($script:shareAddress) } })
+
+# Asks the router to send the port to this PC (UPnP). Returns $true when it agreed.
+function Open-RouterPort([int]$port) {
+    try {
+        $ip = (Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway } | Select-Object -First 1).IPv4Address.IPAddress
+        if (-not $ip) { return $false }
+        $maps = (New-Object -ComObject HNetCfg.NATUPnP).StaticPortMappingCollection
+        if (-not $maps) { return $false }
+        try { $maps.Remove($port, 'TCP') } catch { }
+        [void]$maps.Add($port, 'TCP', $port, $ip, $true, 'Wii Party online')
+        return $true
+    } catch { return $false }
+}
 
 # ---- Help tab
 $tHelp = New-Tab 'Help'
@@ -320,7 +368,7 @@ $help.Text = ("HOW TO START`r`n" +
     "- A gamepad does nothing: plug it in before pressing PLAY.`r`n" +
     "- The game closed by itself: send the file log.txt from this folder to the person who helps you.`r`n" +
     "- Windows said 'Windows protected your PC': press 'More info' and then 'Run anyway'.`r`n`r`n" +
-    "PLAYING ONLINE`r`nSee the Online tab.")
+    "PLAYING ONLINE`r`nSee the Online tab: one person presses HOST, the others type the address and press JOIN.")
 $help.Select(0, 0)
 $tHelp.Controls.Add($help)
 
@@ -330,9 +378,15 @@ function Read-Settings {
     $cfg.aspect = if ($aspect.SelectedIndex -eq 1) { '4:3' } else { '16:9' }
     $cfg.fullscreen = if ($full.Checked) { '1' } else { '0' }
     $cfg.sideways = if ($side.Checked) { '1' } else { '0' }
+    $cfg.name = $netName.Text.Trim()
+    $cfg.local = $localChoices[[Math]::Max(0, $netLocal.SelectedIndex)][0]
+    $cfg.friends = [string]($netFriends.SelectedIndex + 1)
+    $cfg.port = if ($netPort.Text.Trim() -match '^\d+$') { $netPort.Text.Trim() } else { '47123' }
+    $cfg.join = $netJoin.Text.Trim()
 }
 
-$play.Add_Click({
+# Starts the game. $online: the WPR_NET_* settings for an online game, or empty.
+function Start-Game([hashtable]$online) {
     Read-Settings
     if (-not (Update-GameStatus)) {
         $tabs.SelectedTab = $tPlay
@@ -362,18 +416,53 @@ $play.Add_Click({
     $env:WPR_FULLSCREEN = $cfg.fullscreen
     $env:WPR_SIDEWAYS = $cfg.sideways
     foreach ($a in $actions) { Set-Item ('Env:WPR_KEY_' + $a[0]) $cfg['key_' + $a[0]] }
+    foreach ($k in 'WPR_NET_HOST', 'WPR_NET_JOIN', 'WPR_NET_PLAYERS', 'WPR_NET_NAME', 'WPR_NET_LOCAL') { Remove-Item "Env:$k" -ErrorAction SilentlyContinue }
+    if ($online) { foreach ($k in $online.Keys) { Set-Item "Env:$k" $online[$k] } }
     $started = Get-Date
     $proc = Start-Process -FilePath $exe -ArgumentList ('"' + $cfg.disc + '"') -WorkingDirectory $dir `
         -RedirectStandardError (Join-Path $dir 'log.txt') -NoNewWindow -PassThru
     $null = $proc.Handle  # keeps the exit code readable after it ends
-    $form.Hide()
+    $form.WindowState = 'Minimized'
     $proc.WaitForExit()
+    if ($proc.ExitCode -eq 2) {
+        # an online game that couldn't start: the game already said why; back to the launcher
+        $form.WindowState = 'Normal'
+        return
+    }
     if ($proc.ExitCode -ne 0) {
         Show-Message ("The game stopped unexpectedly.`r`n`r`nPlease send the file log.txt from this folder to the person who helps you:`r`n$dir") 'Error'
     } elseif (((Get-Date) - $started).TotalSeconds -lt 5) {
         Show-Message ("The game closed right away.`r`n`r`nPlease send the file log.txt from this folder to the person who helps you:`r`n$dir") 'Warning'
     }
     $form.Close()
+}
+
+$play.Add_Click({ Start-Game $null })
+
+$hostBtn.Add_Click({
+    Read-Settings
+    $port = [int]$cfg.port
+    $hostInfo.Text = 'Getting your address...'; $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor; $form.Refresh()
+    $opened = Open-RouterPort $port
+    $public = $null
+    try { $public = (Invoke-RestMethod -Uri 'https://api.ipify.org' -TimeoutSec 5).ToString().Trim() } catch { }
+    $form.Cursor = [System.Windows.Forms.Cursors]::Default
+    if ($public) {
+        $script:shareAddress = if ($port -eq 47123) { $public } else { "${public}:$port" }
+        $hostInfo.Text = "Friends type: $($script:shareAddress)" + $(if ($opened) { '' } else { "`r`n(the router didn't open the port by itself: see below)" })
+        $copyBtn.Visible = $true
+        [System.Windows.Forms.Clipboard]::SetText($script:shareAddress)
+        Show-Message ("Send your friends this address (it is already copied, paste it in a chat):`r`n`r`n$($script:shareAddress)`r`n`r`nThe game opens now and waits until they have joined.")
+    } else {
+        $hostInfo.Text = "Couldn't find your internet address. Friends on the same network or VPN can use this PC's address."
+    }
+    Start-Game @{ WPR_NET_HOST = [string]$port; WPR_NET_PLAYERS = $cfg.friends; WPR_NET_NAME = $cfg.name; WPR_NET_LOCAL = $cfg.local }
+})
+
+$joinBtn.Add_Click({
+    Read-Settings
+    if (-not $cfg.join) { Show-Message "Type the address the host sent you first." 'Warning'; return }
+    Start-Game @{ WPR_NET_JOIN = $cfg.join; WPR_NET_NAME = $cfg.name; WPR_NET_LOCAL = $cfg.local }
 })
 
 $form.Add_FormClosing({ Read-Settings; Save-Settings })

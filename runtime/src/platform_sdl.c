@@ -15,6 +15,7 @@
 
 #include "gx_gl.h"
 
+#include "netplay.h"
 #include "runtime.h"
 
 /* Wii Remote core button bits as reported by WPAD (wiibrew: Wiimote#Buttons) */
@@ -315,9 +316,10 @@ static void poll_input(void) {
 void platform_set_fps(int fps) {
     static int last;
     if (fps >= 0) last = fps;
-    char t[160];
-    SDL_snprintf(t, sizeof t, "Wii Party  |  %d fps  |  %s (F1 to change)  |  F11 full screen", last,
-                 sideways ? "Remotes held sideways" : "Remotes pointing at the screen");
+    char t[360];
+    const char* net = net_status();
+    SDL_snprintf(t, sizeof t, "Wii Party  |  %s%s%d fps  |  %s (F1 to change)  |  F11 full screen", net ? net : "",
+                 net ? "  |  " : "", last, sideways ? "Remotes held sideways" : "Remotes pointing at the screen");
     SDL_SetWindowTitle(window, t);
 }
 

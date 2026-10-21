@@ -10,6 +10,7 @@
 #include "ppc_context.h"
 #include "runtime.h"
 #include "gx.h"
+#include "det.h"
 
 static uint16_t vi_regs[0x80];
 
@@ -103,7 +104,7 @@ static uint64_t ai_start_ns;
 static uint32_t ai_rate(void) { return (ai_control & 2) ? 48000u : 32000u; }
 static uint32_t ai_count(void) {
     if (!(ai_control & 1)) return ai_count_base;
-    return ai_count_base + (uint32_t)((SDL_GetTicksNS() - ai_start_ns) * ai_rate() / 1000000000ull);
+    return ai_count_base + (uint32_t)((det_now_ns() - ai_start_ns) * ai_rate() / 1000000000ull);
 }
 /* AIDFR (bit 6) picks the rate the DSP's DMA output plays at */
 uint32_t hw_ai_dma_rate(void) { return (ai_control & 0x40) ? 32000u : 48000u; }
@@ -124,11 +125,11 @@ static void ai_write(uint32_t a, uint32_t v) {
         if (v & 0x08) ai_control &= ~0x08u;          /* AIINT: write 1 to clear */
         ai_control = (ai_control & 0x08) | (v & ~0x28u);
         ai_count_base = now;
-        ai_start_ns = SDL_GetTicksNS();
+        ai_start_ns = det_now_ns();
         break;
     }
     case 0x04: ai_volume = v; break;
-    case 0x08: ai_count_base = v; ai_start_ns = SDL_GetTicksNS(); break;
+    case 0x08: ai_count_base = v; ai_start_ns = det_now_ns(); break;
     default: ai_irq_timing = v; break;
     }
 }

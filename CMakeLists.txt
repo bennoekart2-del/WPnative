@@ -16,7 +16,8 @@ FetchContent_MakeAvailable(SDL3)
 set(RUNTIME_SRC
     runtime/src/main.c runtime/src/boot.c runtime/src/cpu_services.c runtime/src/hw.c runtime/src/dsp.c
     runtime/src/gx_fifo.c runtime/src/gx_render.c runtime/src/gx_gl.c runtime/src/platform_sdl.c runtime/src/platform_audio.c runtime/src/threads.c
-    runtime/src/ipc.c runtime/src/ios_devices.c runtime/src/hle_input.c runtime/src/rel_link.c runtime/src/nand_defaults.c)
+    runtime/src/ipc.c runtime/src/ios_devices.c runtime/src/hle_input.c runtime/src/rel_link.c runtime/src/nand_defaults.c
+    runtime/src/det.c runtime/src/netplay.c)
 
 if(WPR_GEN_DIR)
     file(GLOB GEN_SRC ${WPR_GEN_DIR}/*.c)
@@ -28,6 +29,9 @@ endif()
 add_executable(wiiparty-native ${RUNTIME_SRC} ${GEN_SRC})
 target_include_directories(wiiparty-native PRIVATE runtime/include ${WPR_GEN_DIR})
 target_link_libraries(wiiparty-native PRIVATE SDL3::SDL3-static)
+if(WIN32)
+    target_link_libraries(wiiparty-native PRIVATE ws2_32)
+endif()
 if(NOT MSVC)
     target_link_libraries(wiiparty-native PRIVATE m)
     target_compile_options(wiiparty-native PRIVATE -Wno-unused-label)

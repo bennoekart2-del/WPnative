@@ -12,6 +12,8 @@
 #include "gx.h"
 #include "ios.h"
 #include "ppc_context.h"
+#include "det.h"
+#include "netplay.h"
 #include "runtime.h"
 
 #ifdef _WIN32
@@ -42,7 +44,7 @@ uint32_t hw_vi_xfb_addr(void);
 
 static PPCContext g_cpu;
 
-uint64_t host_ticks_ns(void) { return SDL_GetTicksNS(); }
+uint64_t host_ticks_ns(void) { return det_now_ns(); }
 static SDL_AtomicInt g_running;
 
 PPCFunc ppc_hle_lookup(uint32_t addr) {
@@ -99,6 +101,8 @@ int main(int argc, char** argv) {
             fprintf(stderr, "this build has no recompiled game code; run tools/build_game first\n");
             return 1;
         }
+        if (!net_start(argv[1])) return 2;  /* before the NAND is set up: a joiner uses the host's. 2: the launcher reopens */
+        det_init();
         if (!boot_load(argv[1], &entry)) return 1;
         ios_set_disc_root(argv[1]);
         SDL_SetAtomicInt(&g_running, 1);

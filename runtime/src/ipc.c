@@ -12,6 +12,7 @@
 
 #include "ios.h"
 #include "ppc_context.h"
+#include "det.h"
 
 void irq_raise(uint32_t cause);
 void irq_clear(uint32_t cause);
@@ -121,8 +122,17 @@ static void reply_deferred(uint32_t req, int32_t result) {
     if (n == MAX_DEFERRED) { reply(req, result); return; }
     deferred[n].req = req;
     deferred[n].res = result;
-    deferred[n].due = SDL_GetTicksNS() + NAND_OPEN_NS;
+    deferred[n].due = det_now_ns() + NAND_OPEN_NS;
     SDL_SetAtomicInt(&n_deferred, n + 1);
+}
+
+uint64_t ipc_next(void) {
+    int n = SDL_GetAtomicInt(&n_deferred);
+    if (!n) return UINT64_MAX;
+    if (!req_n && ready() && rep_n) return 0;  /* ipc_tick hands it over at once */
+    uint64_t t = UINT64_MAX;
+    for (int i = 0; i < n; i++) if (deferred[i].due < t) t = deferred[i].due;
+    return t;
 }
 
 void ipc_tick(uint64_t now) {

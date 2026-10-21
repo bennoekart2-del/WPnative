@@ -21,6 +21,7 @@
 
 #include "ppc_context.h"
 #include "runtime.h"
+#include "det.h"
 
 #define MAX_THREADS 256
 
@@ -308,8 +309,12 @@ void hle_longjmp(PPCContext* c) {
 }
 
 /* ------------------------------------------------------------------ interrupts */
+static int irq_waiting;  /* an interrupt is raised and enabled */
+
 static void update_pending(void) {
-    g_irq_pending = ((uint32_t)SDL_GetAtomicInt(&pi_cause) & pi_mask) != 0 || SDL_GetAtomicInt(&dec_fired);
+    irq_waiting = ((uint32_t)SDL_GetAtomicInt(&pi_cause) & pi_mask) != 0 || SDL_GetAtomicInt(&dec_fired);
+    /* deterministic mode keeps every safe point stopping here: det_poll advances guest time */
+    g_irq_pending = g_det || irq_waiting;
 }
 
 void irq_raise(uint32_t cause) {
@@ -324,7 +329,7 @@ void irq_clear(uint32_t cause) {
     update_pending();
 }
 
-void irq_decrementer(void) { SDL_SetAtomicInt(&dec_fired, 1); g_irq_pending = 1; }
+void irq_decrementer(void) { SDL_SetAtomicInt(&dec_fired, 1); irq_waiting = 1; g_irq_pending = 1; }
 
 uint32_t gx_pi_fifo_read(uint32_t off);       /* gx_fifo.c */
 void gx_pi_fifo_write(uint32_t off, uint32_t v);
@@ -372,6 +377,10 @@ void ppc_check_irq(PPCContext* c);
 void ppc_check_irq_current(void) { ppc_check_irq(self()->cpu); }
 
 void ppc_check_irq(PPCContext* c) {
+    if (g_det) {
+        det_poll(c);
+        if (!irq_waiting) return;
+    }
     /* MSR.EE is the only guard: handlers run with EE off, and the OS turns it back on when it idles
      * or switches threads from inside a handler, which is when nested interrupts must be taken. */
     if (!(c->msr & 0x8000u)) return;
@@ -392,34 +401,53 @@ void dsp_ai_tick(uint64_t now);  /* dsp.c */
 void ipc_tick(uint64_t now);     /* ipc.c */
 
 void dec_write(uint32_t ticks) {
-    dec_deadline_ns = SDL_GetTicksNS() + (uint64_t)ticks * 4000 / 243;
+    dec_deadline_ns = det_now_ns() + (uint64_t)ticks * 4000 / 243;
     SDL_SetAtomicInt(&dec_armed, (int32_t)ticks >= 0);
     if ((int32_t)ticks < 0) irq_decrementer();
 }
 
 uint32_t dec_read(void) {
-    int64_t left = (int64_t)(dec_deadline_ns - SDL_GetTicksNS());
+    int64_t left = (int64_t)(dec_deadline_ns - det_now_ns());
     return (uint32_t)(left * 243 / 4000);
+}
+
+uint64_t dsp_ai_next(void);  /* dsp.c */
+uint64_t ipc_next(void);     /* ipc.c */
+static uint64_t next_vi;
+
+uint64_t timers_next(void) {
+    uint64_t t = next_vi, d;
+    if (SDL_GetAtomicInt(&dec_armed) && dec_deadline_ns < t) t = dec_deadline_ns;
+    if ((d = dsp_ai_next()) < t) t = d;
+    if ((d = ipc_next()) < t) t = d;
+    return t;
+}
+
+void timers_run(uint64_t now) {
+    if (SDL_GetAtomicInt(&dec_armed) && now >= dec_deadline_ns) {
+        SDL_SetAtomicInt(&dec_armed, 0);
+        irq_decrementer();
+    }
+    if (now >= next_vi) {
+        next_vi += 1000000000ull / 60;
+        if (g_det) det_frame();
+        vi_retrace();
+    }
+    dsp_ai_tick(now);
+    ipc_tick(now);
 }
 
 static int SDLCALL timer_thread(void* arg) {
     (void)arg;
-    uint64_t next_vi = SDL_GetTicksNS();
+    next_vi = SDL_GetTicksNS();
     for (;;) {
-        uint64_t now = SDL_GetTicksNS();
-        if (SDL_GetAtomicInt(&dec_armed) && now >= dec_deadline_ns) {
-            SDL_SetAtomicInt(&dec_armed, 0);
-            irq_decrementer();
-        }
-        if (now >= next_vi) {
-            next_vi += 1000000000ull / 60;
-            vi_retrace();
-        }
-        dsp_ai_tick(now);
-        ipc_tick(now);
+        timers_run(SDL_GetTicksNS());
         SDL_DelayPrecise(250000);
     }
     return 0;
 }
 
-void timers_start(void) { SDL_DetachThread(SDL_CreateThread(timer_thread, "timers", NULL)); }
+void timers_start(void) {
+    if (g_det) { update_pending(); return; }  /* timers run from the guest's safe points (det.c) */
+    SDL_DetachThread(SDL_CreateThread(timer_thread, "timers", NULL));
+}

@@ -14,6 +14,7 @@
 #include "gx_gl.h"
 #include "gx_internal.h"
 #include "ppc_context.h"
+#include "det.h"
 
 #define EFB_W 640
 #define EFB_H 528
@@ -1259,6 +1260,7 @@ void gx_efb_copy(uint32_t trigger) {
         g_xfb_h = lines;
         g_xfb_stride = (int)stride;
         g_xfb_last_addr = dst;
+        det_mark_gpu(PPC_PHYS(dst | 0x80000000u), PPC_PHYS(dst | 0x80000000u) + (uint32_t)lines * stride);
         g_xfb_copies++;
         if (gl) gx_gl_present(x0, y0, w, h);
         dump_frame(x0, y0, w, h);
@@ -1268,6 +1270,7 @@ void gx_efb_copy(uint32_t trigger) {
     } else {
         uint32_t n = copy_to_texture(trigger, x0, y0, w, h, dst), lo = PPC_PHYS(dst | 0x80000000u);
         invalidate_textures_in(lo, lo + (uint32_t)(w * h * 4));
+        det_mark_gpu(lo, lo + n);
         if (gl) hires_add(trigger, x0, y0, w, h, lo, lo + n);
     }
     if (trigger & (1u << 11)) {
