@@ -142,10 +142,21 @@ static void decode_vertex(const uint8_t** pp, int vat, GxRawVertex* v) {
     }
     uint32_t ntype = field(vcd_lo, 11, 2);
     if (ntype) {
-        uint32_t nbt = field(a, 9, 1), idx3 = field(a, 31, 1);
-        int s = (nbt ? 9 : 3) * comp_size(field(a, 10, 3));
-        if (ntype == 1) p += s;
-        else p += (ntype == 2 ? 1 : 2) * ((nbt && idx3) ? 3 : 1);
+        uint32_t nbt = field(a, 9, 1), idx3 = field(a, 31, 1), fmt = field(a, 10, 3);
+        uint32_t frac = fmt <= 1 ? 6 : fmt <= 3 ? 14 : 0;  /* normals have fixed scales: s8 /64, s16 /16384 */
+        int nvec = nbt ? 3 : 1, vsize = 3 * comp_size(fmt);
+        if (ntype >= 2 && nbt && idx3) {
+            for (int k = 0; k < 3; k++) {
+                const uint8_t* q = attr_ptr(&p, ntype, 1, vsize);
+                for (int i = 0; i < 3; i++) v->nrm[k][i] = read_comp(&q, fmt, frac);
+            }
+        } else {
+            const uint8_t* q = attr_ptr(&p, ntype, 1, nvec * vsize);
+            for (int k = 0; k < nvec; k++)
+                for (int i = 0; i < 3; i++) v->nrm[k][i] = read_comp(&q, fmt, frac);
+        }
+        v->has_nrm = 1;
+        v->has_nbt = (int)nbt;
     }
     for (int ch = 0; ch < 2; ch++) {
         uint32_t ctype = field(vcd_lo, 13 + 2 * ch, 2);

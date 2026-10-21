@@ -10,6 +10,8 @@ extern uint32_t g_cp_matidx_a, g_cp_matidx_b, g_cp_array_base[16], g_cp_array_st
 /* One vertex as read from the stream, before transform. */
 typedef struct {
     float pos[3];
+    float nrm[3][3];       /* normal, binormal, tangent */
+    int has_nrm, has_nbt;
     float col[2][4];       /* 0..255 */
     float tex[8][2];
     int has_col[2];

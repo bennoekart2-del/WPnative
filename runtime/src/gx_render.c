@@ -257,6 +257,7 @@ static void swap_table(int table, int out[4]) {
 
 static void build_state_once(RasterState* rs) {
     uint32_t gen = g_bp[0x00];
+    memset(rs, 0, sizeof *rs);
     rs->nstages = (int)((gen >> 10) & 15) + 1;
     rs->ntex = (int)(gen & 15);
     rs->ncol = (int)((gen >> 4) & 7);
@@ -296,6 +297,34 @@ static void build_state_once(RasterState* rs) {
         st->c_scale = (int)((ce >> 20) & 3); st->c_dest = (int)((ce >> 22) & 3);
         st->a_bias = (int)((ae >> 16) & 3); st->a_sub = (int)((ae >> 18) & 1); st->a_clamp = (int)((ae >> 19) & 1);
         st->a_scale = (int)((ae >> 20) & 3); st->a_dest = (int)((ae >> 22) & 3);
+        st->ind = g_bp[0x10 + s] & 0x1FFFFF;
+        if (st->texen) { rs->texsize[st->texcoord][0] = st->tm.w; rs->texsize[st->texcoord][1] = st->tm.h; }
+    }
+    rs->nind = (int)((gen >> 16) & 7);
+    if (rs->nind > 4) rs->nind = 4;
+    for (int i = 0; i < rs->nind; i++) {
+        GxGlIndStage* is = &rs->ind[i];
+        uint32_t iref = g_bp[0x27] >> (6 * i), ss = g_bp[0x25 + i / 2] >> (8 * (i & 1));
+        is->texmap = (int)(iref & 7);
+        is->texcoord = (int)((iref >> 3) & 7);
+        is->scale_s = (int)(ss & 15);
+        is->scale_t = (int)((ss >> 4) & 15);
+        is->ok = is->texcoord < rs->ntex && tex_get(is->texmap, &is->tm);
+    }
+    for (int m = 0; m < 3; m++) {
+        uint32_t a = g_bp[0x06 + 3 * m], b = g_bp[0x07 + 3 * m], c = g_bp[0x08 + 3 * m];
+        int e[6];
+        uint32_t regs[3] = {a, b, c};
+        for (int k = 0; k < 3; k++) {
+            int lo = (int)(regs[k] & 0x7FF), hi = (int)((regs[k] >> 11) & 0x7FF);
+            e[k * 2] = lo & 0x400 ? lo - 0x800 : lo;
+            e[k * 2 + 1] = hi & 0x400 ? hi - 0x800 : hi;
+        }
+        int scale = (int)(((a >> 22) & 3) | ((b >> 22) & 3) << 2 | ((c >> 22) & 3) << 4);
+        /* rows: (ma, mc, me) and (mb, md, mf) */
+        rs->indmtx[m][0][0] = e[0]; rs->indmtx[m][0][1] = e[2]; rs->indmtx[m][0][2] = e[4];
+        rs->indmtx[m][1][0] = e[1]; rs->indmtx[m][1][1] = e[3]; rs->indmtx[m][1][2] = e[5];
+        rs->indmtx[m][0][3] = rs->indmtx[m][1][3] = scale - 17;
     }
 }
 
@@ -315,20 +344,91 @@ static int tev_combine(int A, int B, int C, int D, int bias, int sub, int scale,
     return clamp ? clamp255(v) : (v < -1024 ? -1024 : v > 1023 ? 1023 : v);
 }
 
+/* TEV compare modes (bias == 3): op = scale << 1 | sub. Modes 0..5 compare R8, GR16 or BGR24 of
+ * the A and B colors (one result for every channel, alpha included), 6/7 compare per channel. */
+static int tev_cmp_scalar(int op, const int a[3], const int b[3]) {
+    int x, y;
+    if (op < 2) { x = a[0]; y = b[0]; }
+    else if (op < 4) { x = a[1] << 8 | a[0]; y = b[1] << 8 | b[0]; }
+    else { x = a[2] << 16 | a[1] << 8 | a[0]; y = b[2] << 16 | b[1] << 8 | b[0]; }
+    return op & 1 ? x == y : x > y;
+}
+
+static int tev_clamp(int v, int clamp) { return clamp ? clamp255(v) : (v < -1024 ? -1024 : v > 1023 ? 1023 : v); }
+
+/* Indirect texturing, after Dolphin's PixelShaderGen: texture coordinates in 1/128 texel fixed point,
+ * offset by a matrix times the indirect texture's (alpha, blue, green) and wrapped. Returns the
+ * stage's coordinate in texels*128 and updates the bump alpha. */
+static void tev_indirect(const RasterState* rs, const Stage* st, const float uv[2], const int itex[4][3],
+                         int tevc[2], int* alphabump) {
+    uint32_t ic = st->ind;
+    int bt = (int)(ic & 3), fmt = (int)((ic >> 2) & 3), bias = (int)((ic >> 4) & 7), bs = (int)((ic >> 7) & 3);
+    int mid = (int)((ic >> 9) & 15), sw = (int)((ic >> 13) & 7), tw = (int)((ic >> 16) & 7), fb = (int)((ic >> 20) & 1);
+    const int* sz = rs->texsize[st->texcoord];
+    int fu = (int)(uv[0] * (float)(sz[0] ? sz[0] : 1) * 128.0f), fv = (int)(uv[1] * (float)(sz[1] ? sz[1] : 1) * 128.0f);
+    int it[2] = {0, 0};
+    if (bt < rs->nind && (bs || mid)) {
+        static const int fmask[4] = {0xFF, 0x1F, 0x0F, 0x07}, amask[4] = {0xF8, 0xE0, 0xF0, 0xF8};
+        int crd[3];
+        for (int k = 0; k < 3; k++) crd[k] = itex[bt][k] & fmask[fmt];
+        if (bs) *alphabump = itex[bt][bs - 1] & amask[fmt];
+        for (int k = 0; k < 3; k++)
+            if (bias & (1 << k)) crd[k] += fmt == 0 ? -128 : 1;
+        int m = -1;
+        if (mid >= 1 && mid <= 3) {
+            m = mid - 1;
+            for (int r = 0; r < 2; r++)
+                it[r] = (rs->indmtx[m][r][0] * crd[0] + rs->indmtx[m][r][1] * crd[1] + rs->indmtx[m][r][2] * crd[2]) >> 3;
+        } else if (mid >= 5 && mid <= 7) {
+            m = mid - 5;
+            it[0] = (fu * crd[0]) >> 8; it[1] = (fv * crd[0]) >> 8;
+        } else if (mid >= 9 && mid <= 11) {
+            m = mid - 9;
+            it[0] = (fu * crd[1]) >> 8; it[1] = (fv * crd[1]) >> 8;
+        }
+        if (m >= 0) {
+            int sh = rs->indmtx[m][0][3];
+            for (int r = 0; r < 2; r++) it[r] = sh >= 0 ? it[r] * (1 << sh) : it[r] >> -sh;
+        }
+    }
+    static const int wsz[8] = {0, 256, 128, 64, 32, 16, 0, 0};
+    int wu = sw == 0 ? fu : sw >= 6 ? 0 : fu & ((wsz[sw] << 7) - 1);
+    int wv = tw == 0 ? fv : tw >= 6 ? 0 : fv & ((wsz[tw] << 7) - 1);
+    if (fb) { tevc[0] += wu + it[0]; tevc[1] += wv + it[1]; }
+    else { tevc[0] = wu + it[0]; tevc[1] = wv + it[1]; }
+    for (int k = 0; k < 2; k++) tevc[k] = (int)((uint32_t)tevc[k] << 8) >> 8;  /* s24 */
+}
+
 static void tev_shade(const RasterState* rs, const int ras[2][4], const float tc[8][2], int out[4]) {
     Col r[4];
     memcpy(r, rs->regs, sizeof r);  /* r[0] = PREV, r[1..3] = REG0..2 */
     int tex[4] = {255, 255, 255, 255};
+    int itex[4][3] = {{0}};
+    for (int i = 0; i < rs->nind; i++) {
+        const GxGlIndStage* is = &rs->ind[i];
+        if (!is->ok) continue;
+        int raw[4];
+        tex_sample(&is->tm, tc[is->texcoord][0] / (float)(1 << is->scale_s), tc[is->texcoord][1] / (float)(1 << is->scale_t), raw);
+        itex[i][0] = raw[3]; itex[i][1] = raw[2]; itex[i][2] = raw[1];
+    }
+    int tevc[2] = {0, 0}, alphabump = 0;
     for (int s = 0; s < rs->nstages; s++) {
         const Stage* st = &rs->st[s];
+        if (st->ind) tev_indirect(rs, st, tc[st->texcoord], (const int (*)[3])itex, tevc, &alphabump);
         if (st->texen) {
             int raw[4];
-            tex_sample(&st->tm, tc[st->texcoord][0], tc[st->texcoord][1], raw);
+            if (st->ind) tex_sample(&st->tm, (float)tevc[0] / (128.0f * (float)st->tm.w), (float)tevc[1] / (128.0f * (float)st->tm.h), raw);
+            else tex_sample(&st->tm, tc[st->texcoord][0], tc[st->texcoord][1], raw);
             for (int k = 0; k < 4; k++) tex[k] = raw[st->tsw[k]];
         }
         int rasc[4] = {0, 0, 0, 0};
         if (st->ras_sel <= 1)
             for (int k = 0; k < 4; k++) rasc[k] = ras[st->ras_sel][st->rsw[k]];
+        else if (st->ras_sel == 5 || st->ras_sel == 6) {
+            int ab = st->ras_sel == 6 ? alphabump | alphabump >> 5 : alphabump;
+            int v[4] = {0, 0, 0, ab};
+            for (int k = 0; k < 4; k++) rasc[k] = v[st->rsw[k]];
+        }
         int cin[4][3];
         for (int i = 0; i < 4; i++) {
             int sel = st->csel[i];
@@ -351,10 +451,32 @@ static void tev_shade(const RasterState* rs, const int ras[2][4], const float tc
             int sel = st->asel[i];
             ain[i] = sel < 4 ? r[sel].c[3] : sel == 4 ? tex[3] : sel == 5 ? rasc[3] : sel == 6 ? st->kalpha : 0;
         }
-        for (int ch = 0; ch < 3; ch++)
-            r[st->c_dest].c[ch] = tev_combine(cin[0][ch], cin[1][ch], cin[2][ch], cin[3][ch],
-                                              st->c_bias, st->c_sub, st->c_scale, st->c_clamp);
-        r[st->a_dest].c[3] = tev_combine(ain[0], ain[1], ain[2], ain[3], st->a_bias, st->a_sub, st->a_scale, st->a_clamp);
+        int cres[3], ares;
+        if (st->c_bias == 3) {
+            int op = st->c_scale << 1 | st->c_sub, a8[3], b8[3];
+            for (int ch = 0; ch < 3; ch++) { a8[ch] = cin[0][ch] & 255; b8[ch] = cin[1][ch] & 255; }
+            int all = tev_cmp_scalar(op, a8, b8);
+            for (int ch = 0; ch < 3; ch++) {
+                int pass = op < 6 ? all : op & 1 ? a8[ch] == b8[ch] : a8[ch] > b8[ch];
+                cres[ch] = tev_clamp(cin[3][ch] + (pass ? cin[2][ch] & 255 : 0), st->c_clamp);
+            }
+        } else {
+            for (int ch = 0; ch < 3; ch++)
+                cres[ch] = tev_combine(cin[0][ch], cin[1][ch], cin[2][ch], cin[3][ch], st->c_bias, st->c_sub, st->c_scale, st->c_clamp);
+        }
+        if (st->a_bias == 3) {
+            int op = st->a_scale << 1 | st->a_sub, pass;
+            if (op < 6) {
+                int a8[3], b8[3];
+                for (int ch = 0; ch < 3; ch++) { a8[ch] = cin[0][ch] & 255; b8[ch] = cin[1][ch] & 255; }
+                pass = tev_cmp_scalar(op, a8, b8);
+            } else pass = op & 1 ? (ain[0] & 255) == (ain[1] & 255) : (ain[0] & 255) > (ain[1] & 255);
+            ares = tev_clamp(ain[3] + (pass ? ain[2] & 255 : 0), st->a_clamp);
+        } else {
+            ares = tev_combine(ain[0], ain[1], ain[2], ain[3], st->a_bias, st->a_sub, st->a_scale, st->a_clamp);
+        }
+        for (int ch = 0; ch < 3; ch++) r[st->c_dest].c[ch] = cres[ch];
+        r[st->a_dest].c[3] = ares;
         if (s == rs->nstages - 1) {
             out[0] = clamp255(r[st->c_dest].c[0]); out[1] = clamp255(r[st->c_dest].c[1]);
             out[2] = clamp255(r[st->c_dest].c[2]); out[3] = clamp255(r[st->a_dest].c[3]);
@@ -446,45 +568,135 @@ static void mtx_mul(int base, const float in[3], float out[3], int rows) {
         out[r] = xff(base + r * 4) * in[0] + xff(base + r * 4 + 1) * in[1] + xff(base + r * 4 + 2) * in[2] + xff(base + r * 4 + 3);
 }
 
+static void unpack_rgba(uint32_t v, float out[4]) {
+    out[0] = (float)(v >> 24); out[1] = (float)((v >> 16) & 255); out[2] = (float)((v >> 8) & 255); out[3] = (float)(v & 255);
+}
+
+static float dot3(const float a[3], const float b[3]) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+
+static void normalize3(float v[3]) {
+    float l = sqrtf(dot3(v, v));
+    if (l > 0) { v[0] /= l; v[1] /= l; v[2] /= l; }
+}
+
+/* One lit channel (XF color/alpha channel control), following Dolphin's LightingShaderGen: the
+ * material color modulated by ambient plus the enabled lights. `comp` picks the components the
+ * channel produces: 0..2 for a color channel, 3 for an alpha channel. */
+static void light_channel(uint32_t ctl, const float vcol[4], uint32_t matreg, uint32_t ambreg, const float pos[3],
+                          const float nrm[3], int first, int last, float out[4]) {
+    float mat[4], amb[4];
+    if (ctl & 1) memcpy(mat, vcol, sizeof mat); else unpack_rgba(matreg, mat);
+    if (!(ctl & 2)) { for (int k = first; k <= last; k++) out[k] = mat[k]; return; }
+    if (ctl & 0x40) memcpy(amb, vcol, sizeof amb); else unpack_rgba(ambreg, amb);
+    float acc[4];
+    for (int k = 0; k < 4; k++) acc[k] = amb[k];
+    uint32_t mask = ((ctl >> 2) & 15) | ((ctl >> 11) & 15) << 4;
+    int diffuse = (int)((ctl >> 7) & 3), attn = (int)((ctl >> 9) & 3);
+    for (int i = 0; i < 8; i++) {
+        if (!(mask & (1u << i))) continue;
+        int base = 0x600 + 16 * i;
+        float lcol[4], cosatt[3], distatt[3], lpos[3], ldir[3];
+        unpack_rgba(g_xf[base + 3], lcol);
+        for (int k = 0; k < 3; k++) {
+            cosatt[k] = xff(base + 4 + k); distatt[k] = xff(base + 7 + k);
+            lpos[k] = xff(base + 10 + k); ldir[k] = xff(base + 13 + k);
+        }
+        float factor = 1, d[3];
+        if (attn & 1) {  /* specular (1) or spot (3) attenuation */
+            if (attn == 3) {
+                for (int k = 0; k < 3; k++) d[k] = lpos[k] - pos[k];
+                float dist2 = dot3(d, d), dist = sqrtf(dist2);
+                if (dist > 0) for (int k = 0; k < 3; k++) d[k] /= dist;
+                float c = fmaxf(0.0f, dot3(d, ldir));
+                float num = fmaxf(0.0f, cosatt[0] + cosatt[1] * c + cosatt[2] * c * c);
+                float den = distatt[0] + distatt[1] * dist + distatt[2] * dist2;
+                factor = den != 0 ? num / den : 0;
+            } else {
+                for (int k = 0; k < 3; k++) d[k] = lpos[k] - pos[k];
+                normalize3(d);
+                if (diffuse) normalize3(distatt);
+                float c = dot3(nrm, d) >= 0 ? fmaxf(0.0f, dot3(nrm, ldir)) : 0;
+                float num = fmaxf(0.0f, cosatt[0] + cosatt[1] * c + cosatt[2] * c * c);
+                float den = distatt[0] + distatt[1] * c + distatt[2] * c * c;
+                factor = den != 0 ? num / den : 0;
+            }
+        } else {
+            for (int k = 0; k < 3; k++) d[k] = lpos[k] - pos[k];
+            normalize3(d);
+        }
+        float dif = diffuse == 0 ? 1 : dot3(d, nrm);
+        if (diffuse == 2) dif = fmaxf(0.0f, dif);
+        for (int k = first; k <= last; k++) acc[k] += lcol[k] * dif * factor;
+    }
+    for (int k = first; k <= last; k++) {
+        float a = acc[k] < 0 ? 0 : acc[k] > 255 ? 255 : acc[k];
+        out[k] = mat[k] * (a + (a >= 128 ? 1 : 0)) / 256.0f;
+    }
+}
+
 void gx_vertex(const GxRawVertex* rv, GxPipeVertex* out) {
     float p[3], q[3];
     p[0] = rv->pos[0]; p[1] = rv->pos[1]; p[2] = rv->pos[2];
     int pm = rv->has_pnmtx ? rv->pnmtx : (int)(g_cp_matidx_a & 63);
     mtx_mul(pm * 4, p, q, 3);
+    /* normal, binormal, tangent through the normal matrix (3x3 rows at XF 0x400) */
+    float n[3][3] = {{0, 0, 1}, {0, 0, 0}, {0, 0, 0}};
+    int nb = 0x400 + (pm & 31) * 3;
+    for (int k = 0; k < (rv->has_nbt ? 3 : 1); k++) {
+        if (!rv->has_nrm) break;
+        for (int r = 0; r < 3; r++)
+            n[k][r] = xff(nb + r * 3) * rv->nrm[k][0] + xff(nb + r * 3 + 1) * rv->nrm[k][1] + xff(nb + r * 3 + 2) * rv->nrm[k][2];
+    }
+    float nl[3] = {n[0][0], n[0][1], n[0][2]};
+    normalize3(nl);
     /* projection */
     float a = xff(0x1020), b = xff(0x1021), c = xff(0x1022), d = xff(0x1023), e = xff(0x1024), f = xff(0x1025);
     int ortho = g_xf[0x1026] != 0;
     if (ortho) { out->clip[0] = a * q[0] + b; out->clip[1] = c * q[1] + d; out->clip[2] = e * q[2] + f; out->clip[3] = 1; }
     else { out->clip[0] = a * q[0] + b * q[2]; out->clip[1] = c * q[1] + d * q[2]; out->clip[2] = e * q[2] + f; out->clip[3] = -q[2]; }
-    /* colors: material from register or vertex, lighting ignored for now */
+    /* color channels: material (register or vertex color), lit when the channel enables lighting */
     for (int ch = 0; ch < 2; ch++) {
-        uint32_t cc = g_xf[0x100E + ch], ac = g_xf[0x1010 + ch];
-        uint32_t mat = g_xf[0x100C + ch];
         float vc[4];
-        for (int k = 0; k < 4; k++) vc[k] = rv->col[ch][k];
-        if (!rv->has_col[ch]) { vc[0] = vc[1] = vc[2] = vc[3] = 255; }
-        for (int k = 0; k < 3; k++) out->col[ch][k] = (cc & 1) ? vc[k] : (float)((mat >> (24 - 8 * k)) & 255);
-        out->col[ch][3] = (ac & 1) ? vc[3] : (float)(mat & 255);
+        int src = rv->has_col[ch] ? ch : rv->has_col[0] ? 0 : -1;  /* one vertex color feeds both channels */
+        for (int k = 0; k < 4; k++) vc[k] = src >= 0 ? rv->col[src][k] : 255;
+        light_channel(g_xf[0x100E + ch], vc, g_xf[0x100C + ch], g_xf[0x100A + ch], q, nl, 0, 2, out->col[ch]);
+        light_channel(g_xf[0x1010 + ch], vc, g_xf[0x100C + ch], g_xf[0x100A + ch], q, nl, 3, 3, out->col[ch]);
     }
-    /* texgen */
+    /* texture coordinate generation (XF TexMtxInfo), then the optional post-transform (dual tex) */
     int ngen = (int)(g_xf[0x103F] & 15);
+    int dualtex = (int)(g_xf[0x1012] & 1);
     for (int t = 0; t < ngen && t < 8; t++) {
         uint32_t g = g_xf[0x1040 + t];
-        int proj = (g >> 1) & 1, type = (g >> 4) & 7, src = (g >> 7) & 31;
+        int proj = (g >> 1) & 1, ab11 = !((g >> 2) & 1), type = (g >> 4) & 7, src = (g >> 7) & 31;
         float in[3] = {0, 0, 1};
         if (src >= 5 && src <= 12) { in[0] = rv->tex[src - 5][0]; in[1] = rv->tex[src - 5][1]; }
         else if (src == 0) { in[0] = p[0]; in[1] = p[1]; in[2] = p[2]; }
+        else if (src == 1) { memcpy(in, rv->nrm[0], sizeof in); }
+        else if (src == 3) { memcpy(in, rv->nrm[2], sizeof in); }  /* tangent */
+        else if (src == 4) { memcpy(in, rv->nrm[1], sizeof in); }  /* binormal */
+        if (ab11 && src < 5) in[2] = 1;
         int tm;
         uint32_t mi = t < 4 ? g_cp_matidx_a : g_cp_matidx_b;
         tm = t < 4 ? (int)((mi >> (6 + 6 * t)) & 63) : (int)((mi >> (6 * (t - 4))) & 63);
         if (rv->has_tmtx[t]) tm = rv->tmtx[t];
         float o[3] = {in[0], in[1], 1};
         if (type == 0) {
-            float in4[3] = {in[0], in[1], in[2]};
-            mtx_mul(tm * 4, in4, o, proj ? 3 : 2);
+            mtx_mul(tm * 4, in, o, proj ? 3 : 2);
             if (!proj) o[2] = 1;
+        } else if (type == 1) {
+            /* emboss: the source texgen's coordinates (the light offset is left out) */
+            int st = (int)((g >> 12) & 7);
+            if (st < t) memcpy(o, out->tc[st], sizeof o);
         } else {
-            o[0] = in[0]; o[1] = in[1]; o[2] = 1;
+            o[0] = out->col[type - 2][0] / 255.0f; o[1] = out->col[type - 2][1] / 255.0f; o[2] = 1;
+        }
+        if (dualtex && type == 0) {
+            uint32_t post = g_xf[0x1050 + t];
+            float pin[3] = {o[0], o[1], o[2]};
+            if (post & 0x100) normalize3(pin);
+            int base = 0x500 + (int)(post & 63) * 4;
+            for (int r = 0; r < 3; r++)
+                o[r] = xff(base + r * 4) * pin[0] + xff(base + r * 4 + 1) * pin[1] + xff(base + r * 4 + 2) * pin[2] + xff(base + r * 4 + 3);
         }
         out->tc[t][0] = o[0]; out->tc[t][1] = o[1]; out->tc[t][2] = o[2];
     }
@@ -668,11 +880,71 @@ static void publish(void) {
     }
 }
 
+extern uint64_t g_xfb_copies;
+/* WPR_GX_TRACE=first-last (debugging): logs every draw state and EFB copy of those frames. */
+static int gx_tracing(void) {
+    static int lo = -1, hi = -1;
+    if (lo == -1) {
+        const char* e = getenv("WPR_GX_TRACE");
+        lo = -2;
+        if (e) sscanf(e, "%d-%d", &lo, &hi);
+    }
+    return lo >= 0 && g_xfb_copies >= (uint64_t)lo && g_xfb_copies <= (uint64_t)hi;
+}
+
+static void trace_state(const RasterState* rs) {
+    fprintf(stderr, "[gxs] f%llu stages=%d ntex=%d ncol=%d alpha=%06X z=%X c=%X ind=%X gen=%08X ngen=%u chan=%08X/%08X\n",
+            (unsigned long long)g_xfb_copies, rs->nstages, rs->ntex, rs->ncol, rs->alpha_cfg, rs->zmode, rs->cmode,
+            g_bp[0x27], g_bp[0x00], g_xf[0x103F], g_xf[0x100E], g_xf[0x1010]);
+    fprintf(stderr, "[gxs]   regs prev %d,%d,%d,%d c0 %d,%d,%d,%d c1 %d,%d,%d,%d c2 %d,%d,%d,%d\n",
+            rs->regs[0][0], rs->regs[0][1], rs->regs[0][2], rs->regs[0][3], rs->regs[1][0], rs->regs[1][1], rs->regs[1][2],
+            rs->regs[1][3], rs->regs[2][0], rs->regs[2][1], rs->regs[2][2], rs->regs[2][3], rs->regs[3][0], rs->regs[3][1],
+            rs->regs[3][2], rs->regs[3][3]);
+    for (int t = 0; t < rs->ntex; t++)
+        fprintf(stderr, "[gxs]   texgen%d %08X post %08X\n", t, g_xf[0x1040 + t], g_xf[0x1050 + t]);
+    const char* dir = getenv("WPR_GX_TRACE_DIR");
+    for (int st = 0; dir && st < rs->nstages; st++) {  /* each decoded texture once, as RGBA (PAM) */
+        static const void* seen[256];
+        static int nseen;
+        const Stage* g = &rs->st[st];
+        if (!g->texen) continue;
+        int k;
+        for (k = 0; k < nseen && seen[k] != g->tm.px; k++) {}
+        if (k < nseen || nseen == 256) continue;
+        seen[nseen++] = g->tm.px;
+        char path[512];
+        snprintf(path, sizeof path, "%s/tex%03d_f%llu_%dx%d.pam", dir, nseen, (unsigned long long)g_xfb_copies, g->tm.w, g->tm.h);
+        FILE* f = fopen(path, "wb");
+        if (!f) continue;
+        fprintf(f, "P7\nWIDTH %d\nHEIGHT %d\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n", g->tm.w, g->tm.h);
+        for (int y = 0; y < g->tm.h; y++) fwrite(g->tm.px + y * g->tm.stride, 4, (size_t)g->tm.w, f);
+        fclose(f);
+        int m = g->texmap & 3, set = g->texmap < 4 ? 0 : 0x20;
+        uint32_t addr = (g_bp[0x94 + m + set] & 0xFFFFFF) << 5;
+        snprintf(path, sizeof path, "%s/tex%03d_%08X_fmt%u.bin", dir, nseen, addr, (g_bp[0x88 + m + set] >> 20) & 15);
+        f = fopen(path, "wb");
+        if (f) { fwrite(g_mem + PPC_PHYS(addr | 0x80000000u), 1, (size_t)g->tm.stride * (size_t)(g->tm.h + 8) * 4, f); fclose(f); }
+    }
+    for (int s = 0; s < rs->nstages; s++) {
+        const Stage* st = &rs->st[s];
+        int m = st->texmap & 3, set = st->texmap < 4 ? 0 : 0x20;
+        uint32_t img0 = g_bp[0x88 + m + set];
+        fprintf(stderr, "[gxs]   s%d tex=%d map%d tc%d fmt=%u %ux%u ras=%d c=%d%d%d%d a=%d%d%d%d k=%d,%d,%d,%d "
+                "tsw=%d%d%d%d rsw=%d%d%d%d cop=%d%d%d%d>%d aop=%d%d%d%d>%d ind=%08X\n",
+                s, st->texen, st->texmap, st->texcoord, (img0 >> 20) & 15, (img0 & 0x3FF) + 1, ((img0 >> 10) & 0x3FF) + 1,
+                st->ras_sel, st->csel[0], st->csel[1], st->csel[2], st->csel[3], st->asel[0], st->asel[1], st->asel[2], st->asel[3],
+                st->konst[0], st->konst[1], st->konst[2], st->kalpha, st->tsw[0], st->tsw[1], st->tsw[2], st->tsw[3],
+                st->rsw[0], st->rsw[1], st->rsw[2], st->rsw[3], st->c_bias, st->c_sub, st->c_clamp, st->c_scale, st->c_dest,
+                st->a_bias, st->a_sub, st->a_clamp, st->a_scale, st->a_dest, g_bp[0x10 + s]);
+    }
+}
+
 static const RasterState* current_state(void) {
     if (raster_dirty || cur_state < 0) {
         int slot = nstate++ % STATES;
         if (nworkers > 0) wait_jobs(state_last_job[slot]);
         build_state(&states[slot]);
+        if (gx_tracing()) trace_state(&states[slot]);
         cur_state = slot;
         raster_dirty = 0;
     }
@@ -765,8 +1037,14 @@ uint64_t g_xfb_copies;  /* frames the game finished: the fps counter in the titl
 static void dump_frame(int x0, int y0, int w, int h) {
     static const char* dir;
     static int checked, n;
-    if (!checked) { dir = getenv("WPR_DUMP_FRAMES"); checked = 1; }
-    if (!dir || (g_xfb_copies - 1) % (uint64_t)render_every() != 0) return;
+    static uint64_t every;
+    if (!checked) {
+        dir = getenv("WPR_DUMP_FRAMES");
+        const char* e = getenv("WPR_DUMP_EVERY");  /* dump only every Nth frame (default: every drawn one) */
+        every = e && atoi(e) > 1 ? (uint64_t)atoi(e) : (uint64_t)render_every();
+        checked = 1;
+    }
+    if (!dir || (g_xfb_copies - 1) % every != 0) return;
     char path[512];
     snprintf(path, sizeof path, "%s/frame_%04d.ppm", dir, n++);
     FILE* f = fopen(path, "wb");
@@ -844,6 +1122,22 @@ void gx_efb_copy(uint32_t trigger) {
     if (gl) gx_gl_read_efb(x0, y0, w + 1, h + 1, efb);  /* +1: the box filter of half-size copies reads one more */
     uint32_t dst = (g_bp[0x4B] & 0xFFFFFF) << 5;
     uint32_t stride = (g_bp[0x4D] & 0x3FF) << 5;
+    if (gx_tracing()) {
+        fprintf(stderr, "[gxc] f%llu copy %08X %d,%d %dx%d -> %08X pe=%06X clr=%06X/%06X\n", (unsigned long long)g_xfb_copies,
+                trigger, x0, y0, w, h, dst, g_bp[0x43], g_bp[0x4F], g_bp[0x50]);
+        const char* dir = getenv("WPR_GX_TRACE_DIR");
+        if (dir && !(trigger & (1u << 14))) {  /* texture copies: the EFB rectangle as RGBA (PAM) */
+            static int n;
+            char path[512];
+            snprintf(path, sizeof path, "%s/copy%04d_%08X.pam", dir, n++, dst);
+            FILE* f = fopen(path, "wb");
+            if (f) {
+                fprintf(f, "P7\nWIDTH %d\nHEIGHT %d\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n", w, h);
+                for (int y = 0; y < h; y++) fwrite(efb[y0 + y][x0], 4, (size_t)w, f);
+                fclose(f);
+            }
+        }
+    }
     if (trigger & (1u << 14)) {
         /* to XFB as YUYV, with the vertical scale the game set (BP 0x4E, 8.8 fixed, inverted) */
         uint32_t ys = g_bp[0x4E] & 0x1FF;

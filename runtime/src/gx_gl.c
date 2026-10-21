@@ -92,6 +92,11 @@ static const char* fs_src =
     "uniform ivec4 u_tsw[16], u_rsw[16], u_konst[16], u_csel[16], u_asel[16];\n"
     "uniform ivec4 u_cop[16], u_aop[16]; /* bias, sub, clamp, scale */\n"
     "uniform ivec4 u_dest[16];  /* color dest, alpha dest */\n"
+    "uniform int u_nind, u_icmd[16];\n"
+    "uniform ivec4 u_ind[4];    /* texmap (-1: none), texcoord, scale s, scale t */\n"
+    "uniform ivec4 u_mtx[6];    /* indirect matrix rows, .w = scale shift */\n"
+    "uniform ivec4 u_tcsize[8]; /* texture size per texture coordinate */\n"
+    "uniform ivec4 u_mapsize[8];/* texture size per texture map */\n"
     "vec4 sample_map(int m, vec2 uv) {\n"
     "  if (m == 0) return texture(u_tex[0], uv); if (m == 1) return texture(u_tex[1], uv);\n"
     "  if (m == 2) return texture(u_tex[2], uv); if (m == 3) return texture(u_tex[3], uv);\n"
@@ -114,8 +119,23 @@ static const char* fs_src =
     "  if (fn == 3) return a <= ref; if (fn == 4) return a > ref; if (fn == 5) return a != ref;\n"
     "  if (fn == 6) return a >= ref; return true;\n"
     "}\n"
+    "int tcmp(int op, ivec3 a, ivec3 b) {\n"
+    "  int x, y;\n"
+    "  if (op < 2) { x = a.x; y = b.x; } else if (op < 4) { x = (a.y << 8) | a.x; y = (b.y << 8) | b.x; }\n"
+    "  else { x = (a.z << 16) | (a.y << 8) | a.x; y = (b.z << 16) | (b.y << 8) | b.x; }\n"
+    "  return (op & 1) != 0 ? int(x == y) : int(x > y);\n"
+    "}\n"
+    "int tclamp(int v, int c) { return c != 0 ? c255(v) : clamp(v, -1024, 1023); }\n"
     "void main() {\n"
     "  ivec4 ras[2];\n"
+    "  ivec3 itex[4]; itex[0] = itex[1] = itex[2] = itex[3] = ivec3(0);\n"
+    "  for (int i = 0; i < u_nind; i++) {\n"
+    "    ivec4 is = u_ind[i]; if (is.x < 0) continue;\n"
+    "    vec3 t = v_tc[is.y]; vec2 uv = (t.z != 0.0 && t.z != 1.0) ? t.xy / t.z : t.xy;\n"
+    "    ivec4 raw = ivec4(sample_map(is.x, uv / vec2(float(1 << is.z), float(1 << is.w))) * 255.0 + 0.5);\n"
+    "    itex[i] = ivec3(raw.w, raw.z, raw.y);\n"
+    "  }\n"
+    "  ivec2 tevc = ivec2(0); int alphabump = 0;\n"
     "  vec4 c0 = (0 < u_ncol || u_ncol == 0) ? v_c0 : vec4(0.0);\n"
     "  vec4 c1 = (1 < u_ncol || u_ncol == 0) ? v_c1 : vec4(0.0);\n"
     "  ras[0] = clamp(ivec4(c0 + 0.5), 0, 255); ras[1] = clamp(ivec4(c1 + 0.5), 0, 255);\n"
@@ -124,14 +144,47 @@ static const char* fs_src =
     "  ivec4 outc = ivec4(0);\n"
     "  for (int s = 0; s < u_nstages; s++) {\n"
     "    ivec4 st = u_st[s];\n"
+    "    vec3 t = v_tc[st.y];\n"
+    "    vec2 uv = (t.z != 0.0 && t.z != 1.0) ? t.xy / t.z : t.xy;\n"
+    "    int ic = u_icmd[s];\n"
+    "    if (ic != 0) {\n"
+    "      int bt = ic & 3, fmt = (ic >> 2) & 3, bias = (ic >> 4) & 7, bs = (ic >> 7) & 3;\n"
+    "      int mid = (ic >> 9) & 15, sw = (ic >> 13) & 7, tw = (ic >> 16) & 7, fb = (ic >> 20) & 1;\n"
+    "      ivec2 sz = max(u_tcsize[st.y].xy, ivec2(1));\n"
+    "      ivec2 fuv = ivec2(uv * vec2(sz) * 128.0);\n"
+    "      ivec2 it = ivec2(0);\n"
+    "      if (bt < u_nind && (bs != 0 || mid != 0)) {\n"
+    "        int fm = fmt == 0 ? 255 : fmt == 1 ? 31 : fmt == 2 ? 15 : 7;\n"
+    "        int am = fmt == 1 ? 224 : fmt == 2 ? 240 : 248;\n"
+    "        ivec3 crd = itex[bt] & ivec3(fm);\n"
+    "        if (bs != 0) alphabump = itex[bt][bs - 1] & am;\n"
+    "        int bv = fmt == 0 ? -128 : 1;\n"
+    "        if ((bias & 1) != 0) crd.x += bv; if ((bias & 2) != 0) crd.y += bv; if ((bias & 4) != 0) crd.z += bv;\n"
+    "        int m = -1;\n"
+    "        if (mid >= 1 && mid <= 3) { m = mid - 1; it = ivec2(\n"
+    "            (u_mtx[m * 2].x * crd.x + u_mtx[m * 2].y * crd.y + u_mtx[m * 2].z * crd.z) >> 3,\n"
+    "            (u_mtx[m * 2 + 1].x * crd.x + u_mtx[m * 2 + 1].y * crd.y + u_mtx[m * 2 + 1].z * crd.z) >> 3); }\n"
+    "        else if (mid >= 5 && mid <= 7) { m = mid - 5; it = (fuv * crd.x) >> 8; }\n"
+    "        else if (mid >= 9 && mid <= 11) { m = mid - 9; it = (fuv * crd.y) >> 8; }\n"
+    "        if (m >= 0) { int sh = u_mtx[m * 2].w; it = sh >= 0 ? it * (1 << sh) : it >> (-sh); }\n"
+    "      }\n"
+    "      int wsu = sw == 1 ? 256 : sw == 2 ? 128 : sw == 3 ? 64 : sw == 4 ? 32 : sw == 5 ? 16 : 0;\n"
+    "      int wsv = tw == 1 ? 256 : tw == 2 ? 128 : tw == 3 ? 64 : tw == 4 ? 32 : tw == 5 ? 16 : 0;\n"
+    "      ivec2 w = ivec2(sw == 0 ? fuv.x : sw >= 6 ? 0 : fuv.x & ((wsu << 7) - 1),\n"
+    "                      tw == 0 ? fuv.y : tw >= 6 ? 0 : fuv.y & ((wsv << 7) - 1));\n"
+    "      tevc = fb != 0 ? tevc + w + it : w + it;\n"
+    "      tevc = (tevc << 8) >> 8;\n"
+    "      uv = vec2(tevc) / (128.0 * vec2(max(u_mapsize[st.w].xy, ivec2(1))));\n"
+    "    }\n"
     "    if (st.x != 0) {\n"
-    "      vec3 t = v_tc[st.y];\n"
-    "      vec2 uv = (t.z != 0.0 && t.z != 1.0) ? t.xy / t.z : t.xy;\n"
     "      ivec4 raw = ivec4(sample_map(st.w, uv) * 255.0 + 0.5);\n"
     "      ivec4 sw = u_tsw[s]; tex = ivec4(raw[sw.x], raw[sw.y], raw[sw.z], raw[sw.w]);\n"
     "    }\n"
     "    ivec4 rasc = ivec4(0);\n"
-    "    if (st.z <= 1) { ivec4 rc = ras[st.z]; ivec4 sw = u_rsw[s]; rasc = ivec4(rc[sw.x], rc[sw.y], rc[sw.z], rc[sw.w]); }\n"
+    "    if (st.z <= 1 || st.z == 5 || st.z == 6) {\n"
+    "      ivec4 rc = st.z <= 1 ? ras[st.z] : ivec4(0, 0, 0, st.z == 6 ? alphabump | (alphabump >> 5) : alphabump);\n"
+    "      ivec4 sw = u_rsw[s]; rasc = ivec4(rc[sw.x], rc[sw.y], rc[sw.z], rc[sw.w]);\n"
+    "    }\n"
     "    ivec3 cin[4]; int ain[4];\n"
     "    ivec4 k = u_konst[s];\n"
     "    for (int i = 0; i < 4; i++) {\n"
@@ -148,10 +201,24 @@ static const char* fs_src =
     "    }\n"
     "    ivec4 op = u_cop[s];\n"
     "    int cd = u_dest[s].x, ad = u_dest[s].y;\n"
-    "    ivec3 res = ivec3(combine(cin[0].x, cin[1].x, cin[2].x, cin[3].x, op),\n"
-    "                      combine(cin[0].y, cin[1].y, cin[2].y, cin[3].y, op),\n"
-    "                      combine(cin[0].z, cin[1].z, cin[2].z, cin[3].z, op));\n"
-    "    int ares = combine(ain[0], ain[1], ain[2], ain[3], u_aop[s]);\n"
+    "    ivec3 res; int ares;\n"
+    "    ivec3 a8 = cin[0] & ivec3(255), b8 = cin[1] & ivec3(255);\n"
+    "    if (op.x == 3) {\n"
+    "      int cop = (op.w << 1) | op.y, all = tcmp(cop, a8, b8);\n"
+    "      ivec3 pass = cop < 6 ? ivec3(all) : (cop & 1) != 0 ? ivec3(equal(a8, b8)) : ivec3(greaterThan(a8, b8));\n"
+    "      res = ivec3(tclamp(cin[3].x + pass.x * (cin[2].x & 255), op.z), tclamp(cin[3].y + pass.y * (cin[2].y & 255), op.z),\n"
+    "                  tclamp(cin[3].z + pass.z * (cin[2].z & 255), op.z));\n"
+    "    } else {\n"
+    "      res = ivec3(combine(cin[0].x, cin[1].x, cin[2].x, cin[3].x, op),\n"
+    "                  combine(cin[0].y, cin[1].y, cin[2].y, cin[3].y, op),\n"
+    "                  combine(cin[0].z, cin[1].z, cin[2].z, cin[3].z, op));\n"
+    "    }\n"
+    "    ivec4 aop = u_aop[s];\n"
+    "    if (aop.x == 3) {\n"
+    "      int cop = (aop.w << 1) | aop.y;\n"
+    "      int pass = cop < 6 ? tcmp(cop, a8, b8) : (cop & 1) != 0 ? int((ain[0] & 255) == (ain[1] & 255)) : int((ain[0] & 255) > (ain[1] & 255));\n"
+    "      ares = tclamp(ain[3] + pass * (ain[2] & 255), aop.z);\n"
+    "    } else ares = combine(ain[0], ain[1], ain[2], ain[3], aop);\n"
     "    r[cd].xyz = res; r[ad].w = ares;\n"
     "    if (s == u_nstages - 1) outc = ivec4(clamp(r[cd].xyz, 0, 255), c255(r[ad].w));\n"
     "  }\n"
@@ -177,6 +244,7 @@ static const GxGlState* batch_state;
 static int batch_sc[4];
 static struct {
     GLint nstages, ntex, ncol, alpha, regs, st, tsw, rsw, konst, csel, asel, cop, aop, dest, tex;
+    GLint nind, icmd, ind, mtx, tcsize, mapsize;
 } u;
 
 /* textures uploaded for decoded TexCache pixel buffers, looked up by that pointer */
@@ -228,6 +296,7 @@ static int init_gl(void) {
     U(nstages, "u_nstages"); U(ntex, "u_ntex"); U(ncol, "u_ncol"); U(alpha, "u_alpha"); U(regs, "u_regs");
     U(st, "u_st"); U(tsw, "u_tsw"); U(rsw, "u_rsw"); U(konst, "u_konst"); U(csel, "u_csel"); U(asel, "u_asel");
     U(cop, "u_cop"); U(aop, "u_aop"); U(dest, "u_dest"); U(tex, "u_tex");
+    U(nind, "u_nind"); U(icmd, "u_icmd"); U(ind, "u_ind"); U(mtx, "u_mtx"); U(tcsize, "u_tcsize"); U(mapsize, "u_mapsize");
 #undef U
     static const GLint units[8] = {0, 1, 2, 3, 4, 5, 6, 7};
     p_glUniform1iv(u.tex, 8, units);
@@ -336,6 +405,37 @@ static void apply_state(const GxGlState* s) {
             p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, f);
         }
     }
+    GLint icmd[16] = {0}, ind[4][4], mtx[6][4], tcsize[8][4], mapsize[8][4];
+    memset(mapsize, 0, sizeof mapsize);
+    for (int i = 0; i < s->nstages; i++) {
+        icmd[i] = (GLint)s->st[i].ind;
+        if (s->st[i].texen) { mapsize[s->st[i].texmap][0] = s->st[i].tm.w; mapsize[s->st[i].texmap][1] = s->st[i].tm.h; }
+    }
+    for (int i = 0; i < 4; i++) {
+        const GxGlIndStage* is = &s->ind[i];
+        ind[i][0] = i < s->nind && is->ok ? is->texmap : -1;
+        ind[i][1] = is->texcoord; ind[i][2] = is->scale_s; ind[i][3] = is->scale_t;
+        if (i < s->nind && is->ok && !(bound & (1 << is->texmap))) {
+            bound |= 1 << is->texmap;
+            p_glActiveTexture(GL_TEXTURE0 + (GLenum)is->texmap);
+            p_glBindTexture(GL_TEXTURE_2D, texture_for(&is->tm));
+            p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl_wrap(is->tm.wrap_s));
+            p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl_wrap(is->tm.wrap_t));
+            GLint f = is->tm.linear ? GL_LINEAR : GL_NEAREST;
+            p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, f);
+            p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, f);
+        }
+    }
+    for (int m = 0; m < 3; m++)
+        for (int r = 0; r < 2; r++)
+            for (int k = 0; k < 4; k++) mtx[m * 2 + r][k] = s->indmtx[m][r][k];
+    for (int t = 0; t < 8; t++) { tcsize[t][0] = s->texsize[t][0]; tcsize[t][1] = s->texsize[t][1]; tcsize[t][2] = tcsize[t][3] = 0; }
+    p_glUniform1i(u.nind, s->nind);
+    p_glUniform1iv(u.icmd, 16, icmd);
+    p_glUniform4iv(u.ind, 4, &ind[0][0]);
+    p_glUniform4iv(u.mtx, 6, &mtx[0][0]);
+    p_glUniform4iv(u.tcsize, 8, &tcsize[0][0]);
+    p_glUniform4iv(u.mapsize, 8, &mapsize[0][0]);
     p_glActiveTexture(GL_TEXTURE0);
     p_glUniform1i(u.nstages, s->nstages);
     p_glUniform1i(u.ntex, s->ntex);

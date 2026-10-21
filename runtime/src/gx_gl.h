@@ -14,13 +14,24 @@ typedef struct {
     int csel[4], asel[4];
     int c_bias, c_sub, c_clamp, c_scale, c_dest;
     int a_bias, a_sub, a_clamp, a_scale, a_dest;
+    uint32_t ind;                        /* BP 0x10+n: indirect texture command */
 } GxGlStage;
+
+/* An indirect texture stage: where its offsets come from and how its coordinates are scaled. */
+typedef struct {
+    int texmap, texcoord, scale_s, scale_t, ok;
+    GxGlTexMap tm;
+} GxGlIndStage;
 
 typedef struct {
     int nstages, ntex, ncol;
     int regs[4][4];                      /* PREV, REG0..2 as r, g, b, a */
     uint32_t alpha_cfg, zmode, cmode;
     GxGlStage st[16];
+    int nind;
+    GxGlIndStage ind[4];
+    int indmtx[3][2][4];                 /* rows of the 2x3 matrices (s.10 fixed), .w = scale shift */
+    int texsize[8][2];                   /* size of the texture each texture coordinate is used with */
 } GxGlState;
 
 int platform_gl_make_current(void);    /* platform_sdl.c: binds the renderer's GL context to this thread */
