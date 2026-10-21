@@ -20,3 +20,4 @@ In the game
 
 Something wrong? Look at the Help tab in the launcher.
 If the game closes by itself, send the file log.txt from this folder to whoever helps you.
+Play online with friends? Look at the Online tab in the launcher.

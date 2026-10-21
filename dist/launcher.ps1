@@ -1,5 +1,5 @@
 # Wii Party (native) launcher. Started by "Wii Party.bat". Four tabs: Play (find the game, press
-# Play), Settings, Controls (player 1 keys) and Help. Settings are kept in settings.ini next to it.
+# Play), Settings, Controls (player 1 keys), Online and Help. Settings are kept in settings.ini next to it.
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
@@ -275,6 +275,32 @@ $form.Add_KeyDown({
     $e.Handled = $true; $e.SuppressKeyPress = $true
 })
 
+# ---- Online tab: friends join over the internet with Parsec (their gamepad becomes player 2, 3 or 4 here)
+$tOnline = New-Tab 'Online'
+Add-Label $tOnline 'Play online with friends' 16 12 520 30 $bold | Out-Null
+$onlineText = New-Object System.Windows.Forms.TextBox
+$onlineText.Multiline = $true; $onlineText.ReadOnly = $true; $onlineText.ScrollBars = 'Vertical'; $onlineText.BackColor = [System.Drawing.Color]::White
+$onlineText.Location = New-Object System.Drawing.Point(16, 48); $onlineText.Size = New-Object System.Drawing.Size(520, 390)
+$onlineText.Text = ("One person (the host) runs the game. Friends watch the host's screen and play with their own gamepad through Parsec, a free program. Friends don't need the game.`r`n`r`n" +
+    "THE HOST (the PC with the game)`r`n" +
+    "1. Install Parsec (button below) and make a free account.`r`n" +
+    "2. Add your friends in Parsec (Friends > Add).`r`n" +
+    "3. Wait until your friends have joined, then press PLAY in this launcher.`r`n" +
+    "4. When a friend joins, Parsec asks you to accept. Give them gamepad permission only, so they can't use your keyboard and mouse.`r`n`r`n" +
+    "FRIENDS`r`n" +
+    "1. Install Parsec and make a free account.`r`n" +
+    "2. Plug in a gamepad (Xbox, PlayStation or Switch).`r`n" +
+    "3. In Parsec, find the host's computer and press Connect.`r`n`r`n" +
+    "WHO IS WHICH PLAYER`r`n" +
+    "The host is player 1 (keyboard and mouse). Each friend's gamepad becomes player 2, 3 or 4, in the order they joined.`r`n`r`n" +
+    "TIPS`r`n" +
+    "- Friends should join before the host presses PLAY.`r`n" +
+    "- Laggy? On the Settings tab, pick a lower picture quality.")
+$onlineText.Select(0, 0)
+$tOnline.Controls.Add($onlineText)
+$parsecBtn = Add-Button $tOnline 'Get Parsec (free)' 16 448 200 36
+$parsecBtn.Add_Click({ Start-Process 'https://parsec.app/downloads' })
+
 # ---- Help tab
 $tHelp = New-Tab 'Help'
 $help = New-Object System.Windows.Forms.TextBox
@@ -293,7 +319,8 @@ $help.Text = ("HOW TO START`r`n" +
     "- The game is slow: Settings tab > Picture quality > Original.`r`n" +
     "- A gamepad does nothing: plug it in before pressing PLAY.`r`n" +
     "- The game closed by itself: send the file log.txt from this folder to the person who helps you.`r`n" +
-    "- Windows said 'Windows protected your PC': press 'More info' and then 'Run anyway'.")
+    "- Windows said 'Windows protected your PC': press 'More info' and then 'Run anyway'.`r`n`r`n" +
+    "PLAYING ONLINE`r`nSee the Online tab.")
 $help.Select(0, 0)
 $tHelp.Controls.Add($help)
 
