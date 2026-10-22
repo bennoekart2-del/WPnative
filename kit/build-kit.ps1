@@ -99,7 +99,9 @@ if (-not ((Test-Path $stamp) -and ((Get-Content $stamp -Raw).Trim() -eq $game)))
     & $py (Join-Path $src 'recomp\recompile.py') --dol (Join-Path $game 'sys\main.dol') --hle $hle --out $gen
     if ($LASTEXITCODE -ne 0) { Stop-Build 'Translating the main program failed. Send the text in this window to whoever helps you.' }
     # the minigames, several at once (one Python per core), biggest first so they finish together
-    $rels = @(Get-ChildItem (Join-Path $game 'files\rel\*.rel.lz') | Sort-Object Length -Descending | ForEach-Object { $_.FullName })
+    # some minigames are byte-identical copies under another name: translate each only once
+    $rels = @(Get-ChildItem (Join-Path $game 'files\rel\*.rel.lz') | Sort-Object @{ Expression = 'Length'; Descending = $true }, Name |
+        Group-Object { (Get-FileHash -Algorithm MD5 $_.FullName).Hash } | ForEach-Object { $_.Group[0].FullName })
     $workers = [Math]::Max(1, [Math]::Min([int]$env:NUMBER_OF_PROCESSORS, 12))
     $groups = @(for ($w = 0; $w -lt $workers; $w++) { , @(for ($i = $w; $i -lt $rels.Count; $i += $workers) { $rels[$i] }) })
     $procs = @()

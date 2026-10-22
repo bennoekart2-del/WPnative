@@ -130,14 +130,15 @@ static int parse_addr(const char* s, ENetAddress* a, int default_port) {
 
 /* ------------------------------------------------------------------ messages */
 static int send_msg(Peer* p, int type, const void* data, uint32_t len) {
-    if (!p->alive || !p->ep) return 0;
+    ENetPeer* ep = p->ep;  /* read once: the network thread clears it when the peer drops */
+    if (!p->alive || !ep) return 0;
     ENetPacket* pk = enet_packet_create(NULL, len + 1, ENET_PACKET_FLAG_RELIABLE);
     if (!pk) return 0;
     pk->data[0] = (uint8_t)type;
     if (len) memcpy(pk->data + 1, data, len);
     Out* o = malloc(sizeof *o);
     o->next = NULL;
-    o->ep = p->ep;
+    o->ep = ep;
     o->pk = pk;
     SDL_LockMutex(olock);
     if (out_tail) out_tail->next = o; else out_head = o;
@@ -154,7 +155,7 @@ static void send_outbox(void) {
     SDL_UnlockMutex(olock);
     while (o) {
         Out* next = o->next;
-        if (enet_peer_send(o->ep, 0, o->pk) < 0) enet_packet_destroy(o->pk);
+        if (!o->ep || enet_peer_send(o->ep, 0, o->pk) < 0) enet_packet_destroy(o->pk);
         free(o);
         o = next;
     }
@@ -439,10 +440,17 @@ static void punch_tick(void) {
 
 static void add_punch(const ENetAddress* a) {
     SDL_LockMutex(elock);
-    if (npunches < (int)(sizeof punches / sizeof *punches)) {
-        punches[npunches].a = *a;
-        punches[npunches].until = SDL_GetTicks() + 15000;
-        npunches++;
+    uint64_t now = SDL_GetTicks();
+    int slot = -1;
+    /* the same address again (a friend retrying) or a slot whose 15 seconds are over */
+    for (int i = 0; i < npunches && slot < 0; i++)
+        if (punches[i].a.host == a->host && punches[i].a.port == a->port) slot = i;
+    for (int i = 0; i < npunches && slot < 0; i++)
+        if (now >= punches[i].until) slot = i;
+    if (slot < 0 && npunches < (int)(sizeof punches / sizeof *punches)) slot = npunches++;
+    if (slot >= 0) {
+        punches[slot].a = *a;
+        punches[slot].until = now + 15000;
     }
     SDL_UnlockMutex(elock);
 }
@@ -578,6 +586,23 @@ static const char* board(void) {
     return s && *s ? s : "ntfy.sh";
 }
 
+/* Waits for a non-blocking connect. Windows reports a refused connection only in the exception set,
+ * which ENet's wait doesn't ask for (it would sit out the whole timeout). */
+static int wait_connected(ENetSocket s, int ms) {
+#ifdef _WIN32
+    fd_set w, e;
+    FD_ZERO(&w); FD_ZERO(&e);
+    FD_SET(s, &w); FD_SET(s, &e);
+    struct timeval tv = {ms / 1000, (ms % 1000) * 1000};
+    return select(0, NULL, &w, &e, &tv) > 0 && !FD_ISSET(s, &e) && FD_ISSET(s, &w);
+#else
+    enet_uint32 w = ENET_SOCKET_WAIT_SEND;
+    int err = 0;
+    return enet_socket_wait(s, &w, ms) == 0 && (w & ENET_SOCKET_WAIT_SEND) &&
+           enet_socket_get_option(s, ENET_SOCKOPT_ERROR, &err) == 0 && !err;
+#endif
+}
+
 static int http(const char* method, const char* path, const char* body, int (*line)(const char*, void*), void* ctx,
                 int ms, volatile int* stop) {
     ENetAddress a;
@@ -590,13 +615,11 @@ static int http(const char* method, const char* path, const char* body, int (*li
     if (s == ENET_SOCKET_NULL) return 0;
     enet_socket_set_option(s, ENET_SOCKOPT_NONBLOCK, 1);
     int ok = 0;
-    enet_uint32 w = ENET_SOCKET_WAIT_SEND;
-    int err = 0;
-    if (enet_socket_connect(s, &a) < 0 || enet_socket_wait(s, &w, 8000) < 0 || !(w & ENET_SOCKET_WAIT_SEND) ||
-        enet_socket_get_option(s, ENET_SOCKOPT_ERROR, &err) < 0 || err) {
+    if (enet_socket_connect(s, &a) < 0 || !wait_connected(s, 8000)) {
         enet_socket_destroy(s);
         return 0;
     }
+    enet_uint32 w;
     char req[1024];
     int rl = snprintf(req, sizeof req,
                       "%s %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: wiiparty-native\r\nContent-Length: %u\r\n\r\n%s", method,
@@ -685,19 +708,24 @@ static void room_topic(const char* code) {
 /* A room code is 6 letters and digits with at least one of each (dashes and spaces are ignored);
  * anything else is an address or a computer's name. */
 static int as_room_code(const char* s, char* out, size_t n) {
+    char code[8];
     size_t k = 0;
+    out[0] = 0;
     for (; *s; s++) {
         if (*s == '-' || *s == ' ') continue;
-        if (!((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') || (*s >= '0' && *s <= '9')) || k + 1 >= n) return 0;
-        out[k++] = (char)(*s >= 'a' && *s <= 'z' ? *s - 32 : *s);
+        if (!((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') || (*s >= '0' && *s <= '9')) || k >= 6) return 0;
+        code[k++] = (char)(*s >= 'a' && *s <= 'z' ? *s - 32 : *s);
     }
-    out[k] = 0;
-    return k == 6 && strcspn(out, "0123456789") != k && strspn(out, "0123456789") != k;
+    code[k] = 0;
+    if (k != 6 || strcspn(code, "0123456789") == k || strspn(code, "0123456789") == k || n <= k) return 0;
+    memcpy(out, code, k + 1);
+    return 1;
 }
 
 /* host: tells friends where we are, then punches toward every friend who answers */
 static volatile int host_board_stop;
 static char host_post_id[64];
+static int host_friends;
 
 static int host_board_line(const char* json, void* ctx) {
     (void)ctx;
@@ -729,7 +757,8 @@ static int SDLCALL host_board_thread(void* arg) {
             SDL_DelayNS(3000000000ull);
         }
     }
-    if (posted) say("Online: room %s - waiting for friends to join (0 of %d)", room, npeers > 1 ? npeers - 1 : 1);
+    /* not when a friend already joined (by IP) while the post was on its way: the game shows that */
+    if (posted && !host_board_stop && npeers == 1) say("Online: room %s - waiting for friends to join (0 of %d)", room, host_friends);
     /* listen for friends; the board keeps the connection open and sends a keepalive now and then */
     snprintf(path, sizeof path, "/%s/json?since=%s", topic, host_post_id[0] ? host_post_id : "30s");
     while (!host_board_stop) {
@@ -895,6 +924,7 @@ static int host_start(const char* disc_root, int port, int friends) {
     if (room[0]) {
         say("Online: opening room %s...", room);
         host_board_stop = 0;
+        host_friends = friends;
         SDL_DetachThread(SDL_CreateThread(host_board_thread, "room", NULL));
     }
     int shown = -1;
