@@ -1,5 +1,7 @@
-# Wii Party (native) launcher. Started by "Wii Party.bat". Four tabs: Play (find the game, press
-# Play), Settings, Controls (player 1 keys), Online and Help. Settings are kept in settings.ini next to it.
+# Wii Party (native) launcher. Started by "Wii Party.bat". A pink sidebar with five pages: Play (find the
+# game, press Play), Online, Settings, Controls (player 1 keys) and Help. Settings are kept in settings.ini
+# next to it. Pictures in the art folder (title.jpg, cover.jpg, case.png, host.png) decorate the pages;
+# without them the pages are drawn in plain colours. This file must stay ASCII (Windows PowerShell 5.1).
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
@@ -14,6 +16,248 @@ function Show-Message([string]$text, [string]$icon = 'Information') {
 }
 
 try {
+
+# ------------------------------------------------------------------ drawing helpers (C# 5: Windows' own compiler)
+Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @'
+// BEGIN UI
+using System;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+
+namespace WPR {
+    public static class Native {
+        [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int v);
+        [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+    }
+
+    // A window that lets the launcher see every key first (also arrows, Tab and F1), for the key picker.
+    public class KeyForm : Form {
+        public Func<Keys, bool> KeyHook;
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData) {
+            if (KeyHook != null && (msg.Msg == 0x100 || msg.Msg == 0x104) && KeyHook(keyData)) return true;
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+    }
+
+    // A page: a panel whose pre-drawn background picture is painted without flicker.
+    public class Page : Panel {
+        public Page() { DoubleBuffered = true; }
+    }
+
+    // A rounded, glossy button that is drawn over the page's picture.
+    public class Pill : Control {
+        public Color Color1 = Color.FromArgb(255, 60, 160);
+        public Color Color2 = Color.FromArgb(214, 0, 120);
+        public Color Fore = Color.White;
+        public Color Hover = Color.Empty;
+        public Color Border = Color.Empty;
+        public float Radius = -1f;
+        public bool LeftAlign;
+        public bool Shadow = true;
+        public bool Gloss = true;
+        public string Icon;
+        public Font IconFont;
+        bool hover, down;
+
+        public Pill() {
+            SetStyle(ControlStyles.SupportsTransparentBackColor | ControlStyles.OptimizedDoubleBuffer |
+                     ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            SetStyle(ControlStyles.Selectable, false);
+            BackColor = Color.Transparent;
+            Cursor = Cursors.Hand;
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; down = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseDown(MouseEventArgs e) { if (e.Button == MouseButtons.Left) { down = true; Invalidate(); } base.OnMouseDown(e); }
+        protected override void OnMouseUp(MouseEventArgs e) { down = false; Invalidate(); base.OnMouseUp(e); }
+        protected override void OnTextChanged(EventArgs e) { Invalidate(); base.OnTextChanged(e); }
+        protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
+
+        static Color Mix(Color a, Color b, float t) {
+            return Color.FromArgb((int)(a.A + (b.A - a.A) * t), (int)(a.R + (b.R - a.R) * t),
+                                  (int)(a.G + (b.G - a.G) * t), (int)(a.B + (b.B - a.B) * t));
+        }
+
+        protected override void OnPaint(PaintEventArgs e) {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            float sh = Shadow ? Math.Max(2f, Height / 16f) : 0f;
+            RectangleF r = new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f - sh);
+            if (down) r.Offset(0, sh / 2f);
+            float rad = Radius < 0 ? r.Height / 2f : Radius;
+            Color c1 = Color1, c2 = Color2;
+            if (!Enabled) { c1 = Color.FromArgb(c1.A, 205, 205, 210); c2 = Color.FromArgb(c2.A, 180, 180, 188); }
+            else if (down) { c1 = Mix(c1, Color.FromArgb(c1.A, 0, 0, 0), 0.12f); c2 = Mix(c2, Color.FromArgb(c2.A, 0, 0, 0), 0.12f); }
+            else if (hover) {
+                if (Hover != Color.Empty) { c1 = Hover; c2 = Hover; }
+                else { c1 = Mix(c1, Color.FromArgb(c1.A, 255, 255, 255), 0.18f); c2 = Mix(c2, Color.FromArgb(c2.A, 255, 255, 255), 0.18f); }
+            }
+            if (sh > 0 && c2.A > 0 && !down) {
+                using (GraphicsPath sp = Art.Round(new RectangleF(r.X, r.Y + sh, r.Width, r.Height), rad))
+                using (SolidBrush sb = new SolidBrush(Color.FromArgb(70, Mix(c2, Color.Black, 0.45f))))
+                    g.FillPath(sb, sp);
+            }
+            using (GraphicsPath p = Art.Round(r, rad)) {
+                if (c1.A > 0 || c2.A > 0) {
+                    using (LinearGradientBrush b = new LinearGradientBrush(new RectangleF(r.X, r.Y - 1, r.Width, r.Height + 2), c1, c2, 90f))
+                        g.FillPath(b, p);
+                    if (Gloss) {
+                        RectangleF top = new RectangleF(r.X + rad * 0.35f, r.Y + 1.5f, r.Width - rad * 0.7f, r.Height * 0.46f);
+                        if (top.Width > 2 && top.Height > 2)
+                            using (GraphicsPath gp = Art.Round(top, Math.Min(rad, top.Height / 2f)))
+                            using (LinearGradientBrush gb = new LinearGradientBrush(new RectangleF(top.X, top.Y - 1, top.Width, top.Height + 2),
+                                       Color.FromArgb(95, 255, 255, 255), Color.FromArgb(8, 255, 255, 255), 90f))
+                                g.FillPath(gb, gp);
+                    }
+                }
+                if (Border != Color.Empty)
+                    using (Pen pen = new Pen(Border, Math.Max(1.5f, Height / 24f))) g.DrawPath(pen, p);
+            }
+            Color fc = Enabled ? Fore : Color.FromArgb(120, 120, 128);
+            Rectangle tr = Rectangle.Round(r);
+            TextFormatFlags f = TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis;
+            if (LeftAlign) {
+                int pad = (int)(r.Height * 0.4f);
+                int x = tr.X + pad;
+                if (!string.IsNullOrEmpty(Icon) && IconFont != null) {
+                    int iw = (int)(IconFont.Height * 1.5f);
+                    TextRenderer.DrawText(g, Icon, IconFont, new Rectangle(x, tr.Y, iw, tr.Height), fc, f | TextFormatFlags.HorizontalCenter);
+                    x += iw + pad / 2;
+                }
+                tr = new Rectangle(x, tr.Y, tr.Right - x, tr.Height);
+                f |= TextFormatFlags.Left;
+            } else {
+                f |= TextFormatFlags.HorizontalCenter;
+            }
+            TextRenderer.DrawText(g, Text, Font, tr, fc, f);
+        }
+    }
+
+    // Painting the page backgrounds. Coordinates are in the launcher's own units; the caller scales.
+    public static class Art {
+        public static GraphicsPath Round(RectangleF r, float rad) {
+            GraphicsPath p = new GraphicsPath();
+            float d = Math.Min(rad * 2f, Math.Min(r.Width, r.Height));
+            if (d < 1f) { p.AddRectangle(r); return p; }
+            p.AddArc(r.X, r.Y, d, d, 180, 90);
+            p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+            p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
+        }
+
+        // Reads a picture without keeping the file open. null when it is missing or broken.
+        public static Image Load(string path) {
+            try {
+                if (!File.Exists(path)) return null;
+                using (MemoryStream ms = new MemoryStream(File.ReadAllBytes(path)))
+                using (Image i = Image.FromStream(ms))
+                    return new Bitmap(i);
+            } catch { return null; }
+        }
+
+        static ImageAttributes Fade(float alpha) {
+            ImageAttributes ia = new ImageAttributes();
+            ia.SetWrapMode(WrapMode.TileFlipXY);
+            if (alpha < 1f) {
+                ColorMatrix cm = new ColorMatrix();
+                cm.Matrix33 = alpha;
+                ia.SetColorMatrix(cm);
+            }
+            return ia;
+        }
+
+        // Fills d with the picture, cutting off what sticks out. fx/fy: which part stays (0 = left/top, 1 = right/bottom).
+        public static void Cover(Graphics g, Image img, RectangleF d, float fx, float fy, float alpha) {
+            float s = Math.Max(d.Width / img.Width, d.Height / img.Height);
+            float w = d.Width / s, h = d.Height / s;
+            using (ImageAttributes ia = Fade(alpha))
+                g.DrawImage(img, Rectangle.Round(d), (img.Width - w) * fx, (img.Height - h) * fy, w, h, GraphicsUnit.Pixel, ia);
+        }
+
+        // The whole picture inside d, keeping its shape, centred horizontally and at the bottom.
+        public static RectangleF Contain(Graphics g, Image img, RectangleF d, float alpha) {
+            float s = Math.Min(d.Width / img.Width, d.Height / img.Height);
+            float w = img.Width * s, h = img.Height * s;
+            RectangleF t = new RectangleF(d.X + (d.Width - w) / 2f, d.Bottom - h, w, h);
+            using (ImageAttributes ia = Fade(alpha))
+                g.DrawImage(img, Rectangle.Round(t), 0, 0, img.Width, img.Height, GraphicsUnit.Pixel, ia);
+            return t;
+        }
+
+        // The picture cover-fitted into a rounded rectangle, with smooth edges.
+        public static void RoundImage(Graphics g, Image img, RectangleF d, float rad) {
+            float s = Math.Max(d.Width / img.Width, d.Height / img.Height);
+            using (TextureBrush tb = new TextureBrush(img, WrapMode.Clamp)) {
+                tb.TranslateTransform(d.X - (img.Width * s - d.Width) / 2f, d.Y - (img.Height * s - d.Height) / 2f);
+                tb.ScaleTransform(s, s);
+                using (GraphicsPath p = Round(d, rad)) g.FillPath(tb, p);
+            }
+        }
+
+        public static void Gradient(Graphics g, RectangleF r, Color a, Color b, float angle) {
+            using (LinearGradientBrush br = new LinearGradientBrush(new RectangleF(r.X - 1, r.Y - 1, r.Width + 2, r.Height + 2), a, b, angle))
+                g.FillRectangle(br, r);
+        }
+
+        // A soft drop shadow, then the card itself.
+        public static void Card(Graphics g, RectangleF r, float rad, Color fill) {
+            for (int i = 6; i >= 1; i--) {
+                RectangleF s = new RectangleF(r.X - i, r.Y - i + 4, r.Width + 2 * i, r.Height + 2 * i);
+                using (GraphicsPath p = Round(s, rad + i))
+                using (SolidBrush b = new SolidBrush(Color.FromArgb(7, 120, 0, 60)))
+                    g.FillPath(b, p);
+            }
+            using (GraphicsPath p = Round(r, rad))
+            using (SolidBrush b = new SolidBrush(fill))
+                g.FillPath(b, p);
+        }
+
+        public static void Bubble(Graphics g, RectangleF r, PointF tail, Color fill) {
+            using (GraphicsPath p = Round(r, r.Height / 2.5f)) {
+                float cx = Math.Max(r.X + r.Height / 2f, Math.Min(r.Right - r.Height / 2f, tail.X));
+                p.AddPolygon(new PointF[] { new PointF(cx - 10, r.Bottom - 2), tail, new PointF(cx + 8, r.Bottom - 2) });
+                p.FillMode = FillMode.Winding;
+                using (SolidBrush b = new SolidBrush(Color.FromArgb(40, 120, 0, 60))) {
+                    g.TranslateTransform(0, 3); g.FillPath(b, p); g.TranslateTransform(0, -3);
+                }
+                using (SolidBrush b = new SolidBrush(fill)) g.FillPath(b, p);
+            }
+        }
+
+        public static void Star(Graphics g, PointF c, float r, float turn, Brush b) {
+            PointF[] pts = new PointF[10];
+            for (int i = 0; i < 10; i++) {
+                double a = turn + i * Math.PI / 5 - Math.PI / 2;
+                float rr = (i % 2 == 0) ? r : r * 0.45f;
+                pts[i] = new PointF(c.X + (float)(Math.Cos(a) * rr), c.Y + (float)(Math.Sin(a) * rr));
+            }
+            g.FillPolygon(b, pts);
+        }
+
+        // Little stars like the ones on the box, scattered over an area.
+        public static void Stars(Graphics g, RectangleF area, int count, int seed, Color color, float min, float max) {
+            Random rnd = new Random(seed);
+            using (SolidBrush b = new SolidBrush(color))
+                for (int i = 0; i < count; i++) {
+                    PointF c = new PointF(area.X + (float)rnd.NextDouble() * area.Width, area.Y + (float)rnd.NextDouble() * area.Height);
+                    Star(g, c, min + (float)rnd.NextDouble() * (max - min), (float)rnd.NextDouble(), b);
+                }
+        }
+
+        public static void Ring(Graphics g, PointF c, float r, float width, Color color) {
+            using (Pen p = new Pen(color, width)) g.DrawEllipse(p, c.X - r, c.Y - r, 2 * r, 2 * r);
+        }
+    }
+}
+// END UI
+'@
 
 # action id (WPR_KEY_<id>), label, default SDL key name
 $actions = @(
@@ -100,12 +344,11 @@ $extractHelp = "You need your own Wii Party disc, copied to this PC as a folder.
     "5. Back here, press 'Find my game' (or 'Choose folder' and pick that folder)."
 
 # ------------------------------------------------------------------ keys
-Add-Type -Namespace W -Name K -MemberDefinition '[DllImport("user32.dll")] public static extern short GetAsyncKeyState(int v);'
-function Get-KeyState([int]$vk) { return ([W.K]::GetAsyncKeyState($vk) -band 0x8000) -ne 0 }
+function Get-KeyState([int]$vk) { return ([WPR.Native]::GetAsyncKeyState($vk) -band 0x8000) -ne 0 }
 
 # Windows key -> SDL key name (what the game understands)
-function Get-SdlName([System.Windows.Forms.KeyEventArgs]$e) {
-    $n = $e.KeyCode.ToString()
+function Get-SdlName([System.Windows.Forms.Keys]$key) {
+    $n = ([System.Windows.Forms.Keys]([int]$key -band 0xFFFF)).ToString()
     if ($n -match '^[A-Z]$') { return $n }
     if ($n -match '^D([0-9])$') { return $matches[1] }
     if ($n -match '^NumPad([0-9])$') { return 'Keypad ' + $matches[1] }
@@ -126,73 +369,225 @@ function Get-SdlName([System.Windows.Forms.KeyEventArgs]$e) {
     return $null
 }
 
-# ------------------------------------------------------------------ window
-$font = New-Object System.Drawing.Font('Segoe UI', 10)
-$bold = New-Object System.Drawing.Font('Segoe UI', 11, [System.Drawing.FontStyle]::Bold)
-$form = New-Object System.Windows.Forms.Form
-$form.Text = 'Wii Party'
-$form.FormBorderStyle = 'FixedDialog'
-$form.MaximizeBox = $false
-$form.StartPosition = 'CenterScreen'
-$form.Font = $font
-$form.ClientSize = New-Object System.Drawing.Size(560, 560)
-$form.KeyPreview = $true
+# ------------------------------------------------------------------ look
+# Everything is laid out on a 980 x 620 grid and scaled to the screen ($k), so it is sharp on any display.
+[void][WPR.Native]::SetProcessDPIAware()
+$g0 = [System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero); $k = $g0.DpiX / 96; $g0.Dispose()
+$wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+$k = [Math]::Max(0.7, [Math]::Min($k, [Math]::Min(($wa.Height * 0.95 - 40 * $k) / 620, $wa.Width * 0.95 / 980)))
 
-$tabs = New-Object System.Windows.Forms.TabControl
-$tabs.Dock = 'Fill'
-$form.Controls.Add($tabs)
-function New-Tab([string]$name) {
-    $t = New-Object System.Windows.Forms.TabPage
-    $t.Text = $name; $t.Padding = New-Object System.Windows.Forms.Padding(12); $t.BackColor = [System.Drawing.Color]::White
-    $tabs.TabPages.Add($t); return $t
+function S([double]$v) { return [int][Math]::Round($v * $k) }
+function New-Font([double]$px, [string]$style = 'Regular', [string]$family = 'Segoe UI', [switch]$Unscaled) {
+    $size = if ($Unscaled) { $px } else { $px * $k }
+    return New-Object System.Drawing.Font($family, [single]$size, [System.Drawing.FontStyle]$style, [System.Drawing.GraphicsUnit]::Pixel)
 }
-function Add-Label($parent, [string]$text, $x, $y, $w, $h = 24, $f = $null) {
+function RF([double]$x, [double]$y, [double]$w, [double]$h) { return New-Object System.Drawing.RectangleF([single]$x, [single]$y, [single]$w, [single]$h) }
+function PF([double]$x, [double]$y) { return New-Object System.Drawing.PointF([single]$x, [single]$y) }
+function Rgb([int]$r, [int]$g, [int]$b, [int]$a = 255) { return [System.Drawing.Color]::FromArgb($a, $r, $g, $b) }
+function Set-Bounds($c, $x, $y, $w, $h) {
+    $c.Location = New-Object System.Drawing.Point((S $x), (S $y))
+    $c.Size = New-Object System.Drawing.Size((S $w), (S $h))
+}
+
+$pink = Rgb 230 0 126; $pinkDeep = Rgb 160 0 92; $pinkSoft = Rgb 255 232 244; $ink = Rgb 55 52 66; $muted = Rgb 112 106 124
+$white = [System.Drawing.Color]::White; $clear = [System.Drawing.Color]::Transparent
+$fBody = New-Font 14; $fSmall = New-Font 12.5; $fBold = New-Font 14 'Bold'; $fButton = New-Font 14 'Bold'
+
+$art = Join-Path $dir 'art'
+$imgTitle = [WPR.Art]::Load((Join-Path $art 'title.jpg'))
+$imgCover = [WPR.Art]::Load((Join-Path $art 'cover.jpg'))
+$imgCase = [WPR.Art]::Load((Join-Path $art 'case.png'))
+$imgHost = [WPR.Art]::Load((Join-Path $art 'host.png'))
+
+# Draws a page background once, at screen resolution, in layout units.
+function New-Art([int]$w, [int]$h, [scriptblock]$draw) {
+    $bmp = New-Object System.Drawing.Bitmap((S $w), (S $h))
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode = 'AntiAlias'; $g.InterpolationMode = 'HighQualityBicubic'; $g.PixelOffsetMode = 'HighQuality'
+    $g.TextRenderingHint = 'AntiAliasGridFit'
+    $g.ScaleTransform([single]$k, [single]$k)
+    & $draw $g | Out-Null
+    $g.Dispose()
+    return $bmp
+}
+function Write-Art($g, [string]$text, [double]$x, [double]$y, [double]$px, [string]$style = 'Bold', $color = $pink) {
+    $f = New-Font $px $style -Unscaled
+    $b = New-Object System.Drawing.SolidBrush($color)
+    $g.DrawString($text, $f, $b, [single]$x, [single]$y)
+    $b.Dispose(); $f.Dispose()
+}
+# a pink dot with a step number, then the step's title
+function Write-Step($g, [string]$num, [string]$text, [double]$x, [double]$y) {
+    $b = New-Object System.Drawing.SolidBrush($pink)
+    $g.FillEllipse($b, [single]$x, [single]($y + 2), [single]24, [single]24); $b.Dispose()
+    $f = New-Font 14 'Bold' -Unscaled
+    $sf = New-Object System.Drawing.StringFormat; $sf.Alignment = 'Center'; $sf.LineAlignment = 'Center'
+    $g.DrawString($num, $f, [System.Drawing.Brushes]::White, (RF $x ($y + 2.5) 24 24), $sf)
+    $f.Dispose(); $sf.Dispose()
+    Write-Art $g $text ($x + 32) $y 19
+}
+function Draw-PageBack($g, [int]$seed) {
+    [WPR.Art]::Gradient($g, (RF 0 0 770 620), (Rgb 255 247 251), (Rgb 255 226 240), 90)
+    [WPR.Art]::Stars($g, (RF 0 0 770 620), 34, $seed, (Rgb 200 160 185 70), 3, 7)
+}
+
+function Add-Text($parent, [string]$text, $x, $y, $w, $h, $font = $fBody, $color = $ink) {
     $l = New-Object System.Windows.Forms.Label
-    $l.Text = $text; $l.Location = New-Object System.Drawing.Point($x, $y); $l.Size = New-Object System.Drawing.Size($w, $h)
-    if ($f) { $l.Font = $f }
+    $l.BackColor = $clear; $l.Text = $text; $l.Font = $font; $l.ForeColor = $color; $l.UseMnemonic = $false
+    Set-Bounds $l $x $y $w $h
     $parent.Controls.Add($l); return $l
 }
-function Add-Button($parent, [string]$text, $x, $y, $w, $h = 32) {
-    $b = New-Object System.Windows.Forms.Button
-    $b.Text = $text; $b.Location = New-Object System.Drawing.Point($x, $y); $b.Size = New-Object System.Drawing.Size($w, $h)
+function Set-PillStyle($b, [string]$style) {
+    switch ($style) {
+        'pink' { $b.Color1 = Rgb 255 70 166; $b.Color2 = Rgb 214 0 120; $b.Fore = $white; $b.Border = [System.Drawing.Color]::Empty; $b.Hover = [System.Drawing.Color]::Empty }
+        'blue' { $b.Color1 = Rgb 70 190 255; $b.Color2 = Rgb 0 140 220; $b.Fore = $white; $b.Border = [System.Drawing.Color]::Empty; $b.Hover = [System.Drawing.Color]::Empty }
+        'white' { $b.Color1 = $white; $b.Color2 = Rgb 255 240 248; $b.Fore = $pink; $b.Border = Rgb 245 160 205; $b.Hover = Rgb 255 228 242 }
+    }
+    $b.Invalidate()
+}
+function Add-Pill($parent, [string]$text, $x, $y, $w, $h, [string]$style = 'pink', $font = $fButton) {
+    $b = New-Object WPR.Pill
+    $b.Text = $text; $b.Font = $font
+    Set-Bounds $b $x $y $w $h
+    Set-PillStyle $b $style
     $parent.Controls.Add($b); return $b
 }
+function Add-Box($parent, $x, $y, $w, $h, $font = $fBody) {
+    $t = New-Object System.Windows.Forms.TextBox
+    $t.Font = $font; $t.BorderStyle = 'FixedSingle'; $t.ForeColor = $ink
+    Set-Bounds $t $x $y $w $h
+    $parent.Controls.Add($t); return $t
+}
+function Add-Choice($parent, $x, $y, $w, [string[]]$items) {
+    $c = New-Object System.Windows.Forms.ComboBox
+    $c.DropDownStyle = 'DropDownList'; $c.Font = $fBody; $c.ForeColor = $ink
+    Set-Bounds $c $x $y $w 30
+    [void]$c.Items.AddRange($items)
+    $parent.Controls.Add($c); return $c
+}
 
-# ---- Play tab
-$tPlay = New-Tab 'Play'
-Add-Label $tPlay 'Wii Party' 16 12 400 44 (New-Object System.Drawing.Font('Segoe UI', 22, [System.Drawing.FontStyle]::Bold)) | Out-Null
-Add-Label $tPlay 'Step 1: your game' 16 70 400 26 $bold | Out-Null
-$gameStatus = Add-Label $tPlay '' 16 98 520 44
-$findBtn = Add-Button $tPlay 'Find my game' 16 146 160
-$chooseBtn = Add-Button $tPlay 'Choose folder...' 186 146 160
-$noGameBtn = Add-Button $tPlay "I don't have it yet" 356 146 170
-Add-Label $tPlay 'Step 2: controllers' 16 196 400 26 $bold | Out-Null
-Add-Label $tPlay ("Player 1 uses the keyboard and mouse: move the mouse to point, left click = A, right click = B.`r`n" +
-    "Players 2, 3 and 4: plug in gamepads (Xbox, PlayStation, Switch) before you press Play.") 16 224 520 64 | Out-Null
-Add-Label $tPlay 'Step 3: play' 16 296 400 26 $bold | Out-Null
-$play = Add-Button $tPlay 'PLAY' 16 326 510 64
-$play.Font = New-Object System.Drawing.Font('Segoe UI', 20, [System.Drawing.FontStyle]::Bold)
-$play.BackColor = [System.Drawing.Color]::FromArgb(0, 150, 220); $play.ForeColor = [System.Drawing.Color]::White
-$play.FlatStyle = 'Flat'
-$playStatus = Add-Label $tPlay '' 16 398 520 24
-Add-Label $tPlay "In the game: F11 = full screen on/off, F1 = hold the Remote sideways or upright. Close the game window to quit." 16 430 520 44 | Out-Null
-Add-Label $tPlay 'Questions? Look at the Help tab.' 16 480 520 24 | Out-Null
+# ------------------------------------------------------------------ window
+$form = New-Object WPR.KeyForm
+$form.Text = 'Wii Party'
+$form.AutoScaleMode = 'None'
+$form.FormBorderStyle = 'FixedSingle'
+$form.MaximizeBox = $false
+$form.StartPosition = 'CenterScreen'
+$form.Font = $fBody
+$form.BackColor = $pinkSoft
+$form.ClientSize = New-Object System.Drawing.Size((S 980), (S 620))
+if ($imgCover) {
+    # window icon: the pink badge from the box
+    $ib = New-Object System.Drawing.Bitmap(64, 64)
+    $ig = [System.Drawing.Graphics]::FromImage($ib); $ig.SmoothingMode = 'AntiAlias'; $ig.InterpolationMode = 'HighQualityBicubic'
+    $ig.ScaleTransform(64 / 1060, 64 / 1060); $ig.TranslateTransform(-110, -370)
+    $ig.DrawImage($imgCover, 0, 0, $imgCover.Width, $imgCover.Height); $ig.Dispose()
+    $form.Icon = [System.Drawing.Icon]::FromHandle($ib.GetHicon())
+}
+
+$pages = [ordered]@{}
+function New-Page([string]$name, [scriptblock]$draw) {
+    $p = New-Object WPR.Page
+    Set-Bounds $p 210 0 770 620
+    $p.BackgroundImage = New-Art 770 620 $draw
+    $p.BackgroundImageLayout = 'None'
+    $p.Visible = $false
+    $form.Controls.Add($p); $pages[$name] = $p
+    return $p
+}
+
+# ---- sidebar
+$bar = New-Object WPR.Page
+Set-Bounds $bar 0 0 210 620
+$bar.BackgroundImageLayout = 'None'
+$bar.BackgroundImage = New-Art 210 620 {
+    param($g)
+    [WPR.Art]::Gradient($g, (RF 0 0 210 620), (Rgb 238 20 140), (Rgb 150 0 86), 90)
+    [WPR.Art]::Ring($g, (PF 30 600), 120, 18, (Rgb 255 255 255 22))
+    [WPR.Art]::Ring($g, (PF 200 40), 70, 10, (Rgb 255 255 255 18))
+    # stars above and below the menu, not behind it
+    [WPR.Art]::Stars($g, (RF 0 0 210 262), 12, 11, (Rgb 255 255 255 70), 2.5, 6)
+    [WPR.Art]::Stars($g, (RF 0 540 210 80), 5, 12, (Rgb 255 255 255 70), 2.5, 6)
+    if ($imgCover) {
+        [WPR.Art]::Card($g, (RF 33 24 144 203), 12, (Rgb 255 255 255))
+        [WPR.Art]::RoundImage($g, $imgCover, (RF 36 27 138 197), 10)
+    } else {
+        $b = New-Object System.Drawing.SolidBrush((Rgb 255 255 255))
+        $g.FillEllipse($b, 25, 30, 160, 160); $b.Dispose()
+        Write-Art $g 'Wii' 64 62 40 'Bold' (Rgb 150 150 160)
+        Write-Art $g 'Party' 46 106 44 'Bold' $pink
+    }
+    Write-Art $g 'on your PC' 62 236 15 'Bold' (Rgb 255 255 255 225)
+    Write-Art $g 'Close the game window' 30 572 11.5 'Regular' (Rgb 255 255 255 170)
+    Write-Art $g 'to come back here.' 30 588 11.5 'Regular' (Rgb 255 255 255 170)
+}
+$form.Controls.Add($bar)
+
+$mdl = $null
+if ((New-Object System.Drawing.Text.InstalledFontCollection).Families | Where-Object { $_.Name -eq 'Segoe MDL2 Assets' }) {
+    $mdl = New-Font 17 'Regular' 'Segoe MDL2 Assets'
+}
+$navs = [ordered]@{}
+$navList = @(@('Play', 0xE768), @('Online', 0xE774), @('Settings', 0xE713), @('Controls', 0xE765), @('Help', 0xE897))
+for ($i = 0; $i -lt $navList.Count; $i++) {
+    $n = $navList[$i][0]
+    $b = Add-Pill $bar $n 14 (270 + $i * 54) 182 46 'pink' (New-Font 17 'Bold')
+    $b.LeftAlign = $true; $b.Shadow = $false; $b.Gloss = $false
+    if ($mdl) { $b.Icon = [string][char]$navList[$i][1]; $b.IconFont = $mdl }
+    $b.Tag = $n
+    $b.Add_Click({ param($s, $e) Show-Page $s.Tag })
+    $navs[$n] = $b
+}
+
+# ---- Play page
+$pPlay = New-Page 'Play' {
+    param($g)
+    $g.Clear((Rgb 255 228 241))
+    if ($imgTitle) {
+        [WPR.Art]::Cover($g, $imgTitle, (RF 0 0 770 452), 0.5, 0, 1)
+        [WPR.Art]::Gradient($g, (RF 0 372 770 81), (Rgb 255 228 241 0), (Rgb 255 228 241), 90)
+    } else {
+        [WPR.Art]::Gradient($g, (RF 0 0 770 452), (Rgb 255 120 190), (Rgb 255 228 241), 90)
+        [WPR.Art]::Ring($g, (PF 120 90), 110, 26, (Rgb 255 255 255 60))
+        [WPR.Art]::Ring($g, (PF 660 220), 90, 20, (Rgb 255 255 255 60))
+        [WPR.Art]::Stars($g, (RF 0 0 770 300), 30, 5, (Rgb 255 255 255 120), 4, 10)
+        Write-Art $g 'Wii' 196 90 96 'Bold' (Rgb 140 140 150)
+        Write-Art $g 'Party' 360 90 96 'Bold' $white
+    }
+    [WPR.Art]::Card($g, (RF 24 318 722 280), 22, $white)
+    $pen = New-Object System.Drawing.Pen((Rgb 250 205 228), 1.5); $g.DrawLine($pen, 520, 338, 520, 578); $pen.Dispose()
+    Write-Step $g '1' 'Your game' 48 334
+    Write-Step $g '2' 'Controllers' 48 458
+    Write-Step $g '3' 'Play!' 540 334
+}
+$gameStatus = Add-Text $pPlay '' 80 364 430 42 $fBody
+$findBtn = Add-Pill $pPlay 'Find my game' 80 410 136 36 'blue' (New-Font 13 'Bold')
+$chooseBtn = Add-Pill $pPlay 'Choose folder...' 222 410 136 36 'white' (New-Font 13 'Bold')
+$noGameBtn = Add-Pill $pPlay "I don't have it yet" 364 410 144 36 'white' (New-Font 13 'Bold')
+Add-Text $pPlay ("Player 1: keyboard and mouse. Point with the mouse, left click = A, right click = B.`r`n" +
+    "Players 2, 3 and 4: plug in gamepads (Xbox, PlayStation, Switch) before you press PLAY.") 80 488 430 60 $fSmall | Out-Null
+Add-Text $pPlay "In the game: F11 = full screen, F1 = hold the Remote sideways or upright." 48 552 460 36 $fSmall $muted | Out-Null
+$play = Add-Pill $pPlay 'PLAY' 544 376 182 100 'pink' (New-Font 38 'Bold')
+$playStatus = Add-Text $pPlay '' 540 488 190 96 $fSmall $muted
+$playStatus.TextAlign = 'TopCenter'
 
 function Update-GameStatus {
     $p = Resolve-GameFolder $cfg.disc
     if ($p) {
         $cfg.disc = $p
-        $gameStatus.ForeColor = [System.Drawing.Color]::FromArgb(0, 130, 0)
+        $gameStatus.ForeColor = Rgb 0 140 70
         $gameStatus.Text = "Found your game:`r`n$p"
+        $playStatus.Text = 'Ready! Press PLAY.'
         return $true
     }
-    $gameStatus.ForeColor = [System.Drawing.Color]::FromArgb(190, 0, 0)
+    $gameStatus.ForeColor = Rgb 200 20 60
     $gameStatus.Text = "The game hasn't been found yet. Press 'Find my game'.`r`nNo copy of your disc yet? Press 'I don't have it yet'."
+    $playStatus.Text = 'First find your game (step 1).'
     return $false
 }
 
 $findBtn.Add_Click({
-    $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor; $gameStatus.ForeColor = [System.Drawing.Color]::Black
+    $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor; $gameStatus.ForeColor = $ink
     $gameStatus.Text = 'Looking on this PC... this can take a minute.'; $form.Refresh()
     $p = Find-GameFolder
     $form.Cursor = [System.Windows.Forms.Cursors]::Default
@@ -215,106 +610,55 @@ $chooseBtn.Add_Click({
 })
 $noGameBtn.Add_Click({ Show-Message $extractHelp })
 
-# ---- Settings tab
-$tSet = New-Tab 'Settings'
-Add-Label $tSet 'Picture quality' 16 20 160 | Out-Null
-$scale = New-Object System.Windows.Forms.ComboBox
-$scale.DropDownStyle = 'DropDownList'; $scale.Location = New-Object System.Drawing.Point(190, 16); $scale.Size = New-Object System.Drawing.Size(340, 24)
-[void]$scale.Items.AddRange(@('Automatic (recommended)', 'Original (fastest, blurry)', 'Sharp (2x)', 'Sharper (3x, good for 1080p)',
-    'Very sharp (4x)', 'Ultra (5x, good for 4K)', 'Maximum (6x, needs a strong PC)'))
-$scale.SelectedIndex = if ($cfg.scale -match '^[1-6]$') { [int]$cfg.scale } else { 0 }
-$tSet.Controls.Add($scale)
-Add-Label $tSet 'Screen shape' 16 60 160 | Out-Null
-$aspect = New-Object System.Windows.Forms.ComboBox
-$aspect.DropDownStyle = 'DropDownList'; $aspect.Location = New-Object System.Drawing.Point(190, 56); $aspect.Size = New-Object System.Drawing.Size(340, 24)
-[void]$aspect.Items.AddRange(@('Widescreen 16:9 (recommended)', 'Old TV 4:3'))
-$aspect.SelectedIndex = if ($cfg.aspect -eq '4:3') { 1 } else { 0 }
-$tSet.Controls.Add($aspect)
-$full = New-Object System.Windows.Forms.CheckBox
-$full.Text = 'Start in full screen (F11 switches in the game)'; $full.Location = New-Object System.Drawing.Point(190, 96); $full.Size = New-Object System.Drawing.Size(340, 24)
-$full.Checked = $cfg.fullscreen -eq '1'; $tSet.Controls.Add($full)
-$side = New-Object System.Windows.Forms.CheckBox
-$side.Text = 'Start with the Remote held sideways (F1 switches)'; $side.Location = New-Object System.Drawing.Point(190, 126); $side.Size = New-Object System.Drawing.Size(340, 24)
-$side.Checked = $cfg.sideways -eq '1'; $tSet.Controls.Add($side)
-Add-Label $tSet 'If the game is slow, pick a lower picture quality.' 16 176 520 24 | Out-Null
-$resetAll = Add-Button $tSet 'Back to recommended settings' 16 210 260
-$resetAll.Add_Click({ $scale.SelectedIndex = 0; $aspect.SelectedIndex = 0; $full.Checked = $true; $side.Checked = $false })
-
-# ---- Controls tab
-$tKeys = New-Tab 'Controls'
-Add-Label $tKeys 'Player 1 keys: click a button, then press the key you want.' 12 8 520 24 | Out-Null
-$keyPanel = New-Object System.Windows.Forms.Panel
-$keyPanel.Location = New-Object System.Drawing.Point(8, 34); $keyPanel.Size = New-Object System.Drawing.Size(530, 400); $keyPanel.AutoScroll = $true
-$tKeys.Controls.Add($keyPanel)
-$waiting = $null
-$keyButtons = @{}
-$col = 0; $y = 0
-foreach ($a in $actions) {
-    $x = if ($col -eq 0) { 0 } else { 262 }
-    Add-Label $keyPanel $a[1] $x ($y + 5) 118 | Out-Null
-    $b = Add-Button $keyPanel $cfg['key_' + $a[0]] ($x + 120) $y 128 30
-    $b.Tag = $a[0]
-    $b.Add_Click({ param($s, $e) $script:waiting = $s; $s.Text = 'press a key...' })
-    $b.Add_PreviewKeyDown({ param($s, $e) if ($script:waiting) { $e.IsInputKey = $true } })
-    $keyButtons[$a[0]] = $b
-    if ($col -eq 1) { $y += 34 }
-    $col = 1 - $col
-}
-$resetKeys = Add-Button $tKeys 'Default keys' 12 440 140
-$resetKeys.Add_Click({ foreach ($a in $actions) { $cfg['key_' + $a[0]] = $a[2]; $keyButtons[$a[0]].Text = $a[2] } })
-Add-Label $tKeys "Mouse: point, left click = A, right click = B, middle click = shake, wheel = swing.`r`nGamepads: A/B/X/Y buttons, right stick points, left stick tilts." 12 476 520 44 | Out-Null
-$form.Add_KeyDown({
-    param($s, $e)
-    if (-not $script:waiting) { return }
-    $name = Get-SdlName $e
-    if ($name) {
-        $script:waiting.Text = $name
-        $cfg['key_' + $script:waiting.Tag] = $name
-        $script:waiting = $null
-        $form.ActiveControl = $null  # so the key's release does not click a button
+# ---- Online page: everyone runs the game; the host's game and the friends' games swap only controller input
+$pOnline = New-Page 'Online' {
+    param($g)
+    Draw-PageBack $g 21
+    if ($imgCover) { [WPR.Art]::Cover($g, $imgCover, (RF 0 0 770 620), 0.5, 0.45, 0.16) }
+    Write-Art $g 'Play online' 30 18 32
+    [WPR.Art]::Card($g, (RF 24 112 560 92), 18, $white)
+    [WPR.Art]::Card($g, (RF 24 216 272 196), 18, $white)
+    [WPR.Art]::Card($g, (RF 312 216 272 196), 18, $white)
+    [WPR.Art]::Card($g, (RF 24 424 560 176), 18, $white)
+    Write-Art $g 'Host a game' 42 226 19
+    Write-Art $g "Join a friend's game" 330 226 19
+    if ($imgHost) {
+        [WPR.Art]::Bubble($g, (RF 598 120 160 66), (PF 646 232), $white)
+        Write-Art $g "Let's party" 618 128 17 'Bold' $pink
+        Write-Art $g 'together!' 624 152 17 'Bold' $pink
+        [void][WPR.Art]::Contain($g, $imgHost, (RF 596 230 170 380), 1)
+    } else {
+        [WPR.Art]::Stars($g, (RF 600 120 160 460), 10, 3, (Rgb 230 0 126 90), 8, 18)
     }
-    $e.Handled = $true; $e.SuppressKeyPress = $true
-})
-
-# ---- Online tab: everyone runs the game; the host's game and the friends' games swap only controller input
-$tOnline = New-Tab 'Online'
-Add-Label $tOnline 'Play online with friends' 16 10 520 26 $bold | Out-Null
-Add-Label $tOnline "Everyone needs Wii Party on their own PC: their own disc and this same version of the game. One person hosts, the others join." 16 36 520 40 | Out-Null
-Add-Label $tOnline 'Your name' 16 84 140 | Out-Null
-$netName = New-Object System.Windows.Forms.TextBox
-$netName.Location = New-Object System.Drawing.Point(160, 80); $netName.Size = New-Object System.Drawing.Size(200, 26); $netName.Text = $cfg.name
-$tOnline.Controls.Add($netName)
-Add-Label $tOnline 'Players on this PC' 16 116 140 | Out-Null
-$netLocal = New-Object System.Windows.Forms.ComboBox
-$netLocal.DropDownStyle = 'DropDownList'; $netLocal.Location = New-Object System.Drawing.Point(160, 112); $netLocal.Size = New-Object System.Drawing.Size(360, 26)
-$localChoices = @(@('0', '1 player: keyboard and mouse'), @('1', '1 player: gamepad'), @('0,1', '2 players: keyboard and mouse + 1 gamepad'),
+}
+Add-Text $pOnline ("Everyone needs Wii Party on their own PC: their own disc and this same version of the game. " +
+    "One person hosts, the others join with the room code.") 32 62 556 44 $fSmall $muted | Out-Null
+Add-Text $pOnline 'Your name' 44 124 240 22 $fBold | Out-Null
+$netName = Add-Box $pOnline 44 150 240 30
+$netName.Text = $cfg.name
+Add-Text $pOnline 'Players on this PC' 300 124 264 22 $fBold | Out-Null
+$localChoices = @(@('0', '1 player: keyboard and mouse'), @('1', '1 player: gamepad'), @('0,1', '2 players: keyboard + 1 gamepad'),
     @('1,2', '2 players: 2 gamepads'), @('0,1,2', '3 players'), @('0,1,2,3', '4 players'))
-foreach ($c in $localChoices) { [void]$netLocal.Items.Add($c[1]) }
+$netLocal = Add-Choice $pOnline 300 150 264 @($localChoices | ForEach-Object { $_[1] })
 $netLocal.SelectedIndex = [Math]::Max(0, [Array]::IndexOf(@($localChoices | ForEach-Object { $_[0] }), $cfg.local))
-$tOnline.Controls.Add($netLocal)
 
-Add-Label $tOnline 'Host a game' 16 152 300 24 $bold | Out-Null
-Add-Label $tOnline 'Friends joining' 16 182 140 | Out-Null
-$netFriends = New-Object System.Windows.Forms.ComboBox
-$netFriends.DropDownStyle = 'DropDownList'; $netFriends.Location = New-Object System.Drawing.Point(160, 178); $netFriends.Size = New-Object System.Drawing.Size(60, 26)
-foreach ($n in 1..3) { [void]$netFriends.Items.Add([string]$n) }
+Add-Text $pOnline 'Friends joining' 44 266 130 26 $fBody | Out-Null
+$netFriends = Add-Choice $pOnline 180 262 70 @('1', '2', '3')
 $netFriends.SelectedIndex = [Math]::Max(0, [Math]::Min(2, [int]$cfg.friends - 1))
-$tOnline.Controls.Add($netFriends)
-$hostBtn = Add-Button $tOnline 'HOST' 380 174 140 34
-$hostInfo = Add-Label $tOnline '' 16 214 400 40 $bold
-$copyBtn = Add-Button $tOnline 'Copy' 430 216 90 30
-$copyBtn.Visible = $false
+$hostInfo = Add-Text $pOnline '' 44 298 160 38 (New-Font 24 'Bold') $pink
+$copyBtn = Add-Pill $pOnline 'Copy' 206 302 70 30 'white' (New-Font 12.5 'Bold')
+$copyBtn.Shadow = $false; $copyBtn.Visible = $false
+$hostBtn = Add-Pill $pOnline 'HOST' 44 342 232 50 'pink' (New-Font 20 'Bold')
 
-Add-Label $tOnline "Join a friend's game" 16 262 300 24 $bold | Out-Null
-Add-Label $tOnline "Room code" 16 292 140 | Out-Null
-$netJoin = New-Object System.Windows.Forms.TextBox
-$netJoin.Location = New-Object System.Drawing.Point(160, 288); $netJoin.Size = New-Object System.Drawing.Size(202, 26); $netJoin.Text = $cfg.join
-$tOnline.Controls.Add($netJoin)
-$joinBtn = Add-Button $tOnline 'JOIN' 380 284 140 34
+Add-Text $pOnline 'Room code' 332 262 232 24 $fBody | Out-Null
+$netJoin = Add-Box $pOnline 332 288 232 40 (New-Font 22 'Bold')
+$netJoin.TextAlign = 'Center'; $netJoin.CharacterCasing = 'Upper'; $netJoin.Text = $cfg.join
+$joinBtn = Add-Pill $pOnline 'JOIN' 332 342 232 50 'blue' (New-Font 20 'Bold')
 
 $netHelp = New-Object System.Windows.Forms.TextBox
-$netHelp.Multiline = $true; $netHelp.ReadOnly = $true; $netHelp.ScrollBars = 'Vertical'; $netHelp.BackColor = [System.Drawing.Color]::White
-$netHelp.Location = New-Object System.Drawing.Point(16, 330); $netHelp.Size = New-Object System.Drawing.Size(504, 140)
+$netHelp.Multiline = $true; $netHelp.ReadOnly = $true; $netHelp.ScrollBars = 'Vertical'; $netHelp.BorderStyle = 'None'
+$netHelp.BackColor = $white; $netHelp.ForeColor = $ink; $netHelp.Font = $fSmall
+Set-Bounds $netHelp 44 438 524 112
 $netHelp.Text = ("HOW IT WORKS`r`n" +
     "1. The host picks how many friends join and presses HOST. The game window opens and waits for them.`r`n" +
     "2. The host sends the room code shown here to the friends (it is already copied: paste it in a chat).`r`n" +
@@ -328,10 +672,11 @@ $netHelp.Text = ("HOW IT WORKS`r`n" +
     "- 'Different version': everyone needs the same game version and a Wii Party disc from the same region.`r`n`r`n" +
     "FRIEND WITHOUT THE GAME?`r`n" +
     "They can still play on the host's PC through Parsec (free): it turns their gamepad into a controller on the host's PC. Press 'Get Parsec' below.")
-$tOnline.Controls.Add($netHelp)
-$parsecBtn = Add-Button $tOnline 'Get Parsec' 16 478 120 30
+$pOnline.Controls.Add($netHelp)
+$parsecBtn = Add-Pill $pOnline 'Get Parsec' 44 558 140 32 'white' (New-Font 12.5 'Bold')
+$parsecBtn.Shadow = $false
 $parsecBtn.Add_Click({ Start-Process 'https://parsec.app/downloads' })
-$copyBtn.Add_Click({ if ($script:shareAddress) { [System.Windows.Forms.Clipboard]::SetText($script:shareAddress) } })
+$copyBtn.Add_Click({ if ($script:shareAddress) { [System.Windows.Forms.Clipboard]::SetText($script:shareAddress); $copyBtn.Text = 'Copied' } })
 
 # Asks the router to send the port to this PC (UPnP). Returns $true when it agreed.
 function Open-RouterPort([int]$port) {
@@ -346,13 +691,92 @@ function Open-RouterPort([int]$port) {
     } catch { return $false }
 }
 
-# ---- Help tab
-$tHelp = New-Tab 'Help'
+# ---- Settings page
+$pSet = New-Page 'Settings' {
+    param($g)
+    Draw-PageBack $g 31
+    Write-Art $g 'Settings' 30 18 32
+    [WPR.Art]::Card($g, (RF 24 96 440 344), 18, $white)
+    if ($imgCase) {
+        [WPR.Art]::Ring($g, (PF 618 300), 160, 22, (Rgb 255 255 255 150))
+        [void][WPR.Art]::Contain($g, $imgCase, (RF 480 110 276 360), 1)
+    }
+}
+Add-Text $pSet 'Picture quality' 44 112 400 24 $fBold | Out-Null
+$scale = Add-Choice $pSet 44 138 400 @('Automatic (recommended)', 'Original (fastest, blurry)', 'Sharp (2x)', 'Sharper (3x, good for 1080p)',
+    'Very sharp (4x)', 'Ultra (5x, good for 4K)', 'Maximum (6x, needs a strong PC)')
+$scale.SelectedIndex = if ($cfg.scale -match '^[1-6]$') { [int]$cfg.scale } else { 0 }
+Add-Text $pSet 'Screen shape' 44 184 400 24 $fBold | Out-Null
+$aspect = Add-Choice $pSet 44 210 400 @('Widescreen 16:9 (recommended)', 'Old TV 4:3')
+$aspect.SelectedIndex = if ($cfg.aspect -eq '4:3') { 1 } else { 0 }
+$full = New-Object System.Windows.Forms.CheckBox
+$full.Text = 'Start in full screen (F11 switches in the game)'; $full.BackColor = $clear; $full.ForeColor = $ink
+Set-Bounds $full 44 256 400 28; $full.Checked = $cfg.fullscreen -eq '1'; $pSet.Controls.Add($full)
+$side = New-Object System.Windows.Forms.CheckBox
+$side.Text = 'Start with the Remote held sideways (F1 switches)'; $side.BackColor = $clear; $side.ForeColor = $ink
+Set-Bounds $side 44 288 400 28; $side.Checked = $cfg.sideways -eq '1'; $pSet.Controls.Add($side)
+Add-Text $pSet "If the game is slow, pick a lower picture quality. 'Automatic' picks what suits your screen." 44 326 400 44 $fSmall $muted | Out-Null
+$resetAll = Add-Pill $pSet 'Back to recommended settings' 44 380 280 40 'white'
+$resetAll.Add_Click({ $scale.SelectedIndex = 0; $aspect.SelectedIndex = 0; $full.Checked = $true; $side.Checked = $false })
+
+# ---- Controls page
+$pKeys = New-Page 'Controls' {
+    param($g)
+    Draw-PageBack $g 41
+    Write-Art $g 'Controls' 30 18 32
+    [WPR.Art]::Card($g, (RF 24 100 722 392), 18, $white)
+}
+Add-Text $pKeys 'Player 1 keys: click a key, then press the key you want to use instead.' 32 64 700 26 $fBody $muted | Out-Null
+$waiting = $null
+$keyButtons = @{}
+$fKeyLabel = New-Font 13; $fKey = New-Font 13 'Bold'
+for ($i = 0; $i -lt $actions.Count; $i++) {
+    $a = $actions[$i]
+    $x = 44 + [Math]::Floor($i / 8) * 234; $y = 118 + ($i % 8) * 46
+    Add-Text $pKeys $a[1] $x ($y + 6) 118 24 $fKeyLabel | Out-Null
+    $b = Add-Pill $pKeys $cfg['key_' + $a[0]] ($x + 118) $y 104 34 'white' $fKey
+    $b.Shadow = $false; $b.Gloss = $false; $b.Tag = $a[0]
+    $b.Add_Click({
+        param($s, $e)
+        if ($script:waiting) { $script:waiting.Text = $cfg['key_' + $script:waiting.Tag]; Set-PillStyle $script:waiting 'white' }
+        $script:waiting = $s; $s.Text = 'press a key'; Set-PillStyle $s 'pink'
+    })
+    $keyButtons[$a[0]] = $b
+}
+$resetKeys = Add-Pill $pKeys 'Default keys' 24 508 160 40 'white'
+$resetKeys.Add_Click({ foreach ($a in $actions) { $cfg['key_' + $a[0]] = $a[2]; $keyButtons[$a[0]].Text = $a[2] } })
+Add-Text $pKeys ("Mouse: point, left click = A, right click = B, middle click = shake, wheel = swing.`r`n" +
+    "Gamepads: A/B/X/Y buttons, right stick points, left stick tilts.") 204 508 540 60 $fSmall $muted | Out-Null
+function Stop-KeyWait {
+    if (-not $script:waiting) { return }
+    $script:waiting.Text = $cfg['key_' + $script:waiting.Tag]; Set-PillStyle $script:waiting 'white'
+    $script:waiting = $null
+}
+# while a key button waits, every key press goes to it (arrows and F1 too)
+$form.KeyHook = [Func[System.Windows.Forms.Keys, bool]] {
+    param([System.Windows.Forms.Keys]$keyData)
+    if (-not $script:waiting) { return $false }
+    $name = Get-SdlName $keyData
+    if ($name) {
+        $cfg['key_' + $script:waiting.Tag] = $name
+        Stop-KeyWait
+    }
+    return $true
+}
+
+# ---- Help page
+$pHelp = New-Page 'Help' {
+    param($g)
+    Draw-PageBack $g 51
+    Write-Art $g 'Help' 30 18 32
+    [WPR.Art]::Card($g, (RF 24 80 722 518), 18, $white)
+}
 $help = New-Object System.Windows.Forms.TextBox
-$help.Multiline = $true; $help.ReadOnly = $true; $help.ScrollBars = 'Vertical'; $help.BackColor = [System.Drawing.Color]::White
-$help.Location = New-Object System.Drawing.Point(8, 8); $help.Size = New-Object System.Drawing.Size(530, 500)
+$help.Multiline = $true; $help.ReadOnly = $true; $help.ScrollBars = 'Vertical'; $help.BorderStyle = 'None'
+$help.BackColor = $white; $help.ForeColor = $ink; $help.Font = $fBody
+Set-Bounds $help 48 100 678 480
 $help.Text = ("HOW TO START`r`n" +
-    "1. On the Play tab, press 'Find my game'.`r`n2. Plug in any gamepads.`r`n3. Press PLAY.`r`n`r`n" +
+    "1. On the Play page, press 'Find my game'.`r`n2. Plug in any gamepads.`r`n3. Press PLAY.`r`n`r`n" +
     "GETTING THE GAME FOLDER`r`n" + $extractHelp + "`r`n`r`n" +
     "IN THE GAME`r`n" +
     "Mouse = pointer. Left click = A, right click = B.`r`n" +
@@ -361,13 +785,25 @@ $help.Text = ("HOW TO START`r`n" +
     "F1 = hold the Remote sideways or upright (the window title shows which). Most minigames want it sideways.`r`n" +
     "F11 = full screen on/off. Close the window to quit.`r`n`r`n" +
     "SOMETHING WRONG?`r`n" +
-    "- The game is slow: Settings tab > Picture quality > Original.`r`n" +
+    "- The game is slow: Settings > Picture quality > Original.`r`n" +
     "- A gamepad does nothing: plug it in before pressing PLAY.`r`n" +
     "- The game closed by itself: send the file log.txt from this folder to the person who helps you.`r`n" +
     "- Windows said 'Windows protected your PC': press 'More info' and then 'Run anyway'.`r`n`r`n" +
-    "PLAYING ONLINE`r`nSee the Online tab: one person presses HOST, the others type the room code and press JOIN.")
-$help.Select(0, 0)
-$tHelp.Controls.Add($help)
+    "PLAYING ONLINE`r`nSee the Online page: one person presses HOST, the others type the room code and press JOIN.")
+$pHelp.Controls.Add($help)
+
+function Show-Page([string]$name) {
+    Stop-KeyWait
+    foreach ($n in $pages.Keys) { if ($n -eq $name) { $pages[$n].Visible = $true } }
+    foreach ($n in $pages.Keys) { if ($n -ne $name) { $pages[$n].Visible = $false } }
+    foreach ($n in $navs.Keys) {
+        $b = $navs[$n]
+        if ($n -eq $name) { $b.Color1 = $white; $b.Color2 = $white; $b.Fore = $pink; $b.Hover = $white }
+        else { $b.Color1 = $clear; $b.Color2 = $clear; $b.Fore = $white; $b.Hover = Rgb 255 255 255 45 }
+        $b.Invalidate()
+    }
+    $form.ActiveControl = $null
+}
 
 # ------------------------------------------------------------------ play
 function Read-Settings {
@@ -385,7 +821,7 @@ function Read-Settings {
 function Start-Game([hashtable]$online) {
     Read-Settings
     if (-not (Update-GameStatus)) {
-        $tabs.SelectedTab = $tPlay
+        Show-Page 'Play'
         Show-Message "First the game has to be found: press 'Find my game'." 'Warning'
         return
     }
@@ -400,7 +836,7 @@ function Start-Game([hashtable]$online) {
         $form.Cursor = [System.Windows.Forms.Cursors]::Default
         if ($LASTEXITCODE -ne 0) { Show-Message 'Unpacking the new version failed. Is the disc full?' 'Error'; return }
         Remove-Item wp.zip; $parts | Remove-Item
-        $playStatus.Text = ''
+        [void](Update-GameStatus)
     }
     if (-not (Test-Path -LiteralPath $exe)) {
         Show-Message "The game program (wiiparty-native.exe) isn't in this folder:`r`n$dir`r`n`r`nThis launcher has to be in the same folder as the game program." 'Error'
@@ -414,8 +850,8 @@ function Start-Game([hashtable]$online) {
     $env:WPR_FULLSCREEN = $cfg.fullscreen
     $env:WPR_SIDEWAYS = $cfg.sideways
     foreach ($a in $actions) { Set-Item ('Env:WPR_KEY_' + $a[0]) $cfg['key_' + $a[0]] }
-    foreach ($k in 'WPR_NET_HOST', 'WPR_NET_JOIN', 'WPR_NET_ROOM', 'WPR_NET_PLAYERS', 'WPR_NET_NAME', 'WPR_NET_LOCAL') { Remove-Item "Env:$k" -ErrorAction SilentlyContinue }
-    if ($online) { foreach ($k in $online.Keys) { Set-Item "Env:$k" $online[$k] } }
+    foreach ($k2 in 'WPR_NET_HOST', 'WPR_NET_JOIN', 'WPR_NET_ROOM', 'WPR_NET_PLAYERS', 'WPR_NET_NAME', 'WPR_NET_LOCAL') { Remove-Item "Env:$k2" -ErrorAction SilentlyContinue }
+    if ($online) { foreach ($k2 in $online.Keys) { Set-Item "Env:$k2" $online[$k2] } }
     $started = Get-Date
     $proc = Start-Process -FilePath $exe -ArgumentList ('"' + $cfg.disc + '"') -WorkingDirectory $dir `
         -RedirectStandardError (Join-Path $dir $log) -NoNewWindow -PassThru
@@ -452,8 +888,8 @@ $hostBtn.Add_Click({
     [void](Open-RouterPort $port)  # helps with strict routers; the room code works without it too
     $form.Cursor = [System.Windows.Forms.Cursors]::Default
     $script:shareAddress = New-RoomCode
-    $hostInfo.Text = "Room code: $($script:shareAddress)"
-    $copyBtn.Visible = $true
+    $hostInfo.Text = $script:shareAddress
+    $copyBtn.Text = 'Copy'; $copyBtn.Visible = $true
     [System.Windows.Forms.Clipboard]::SetText($script:shareAddress)
     Show-Message ("Send your friends this room code (it is already copied, paste it in a chat):`r`n`r`n$($script:shareAddress)`r`n`r`nThe game opens now and waits until they have joined. The code is also in the game window's title.")
     Start-Game @{ WPR_NET_HOST = [string]$port; WPR_NET_ROOM = $script:shareAddress; WPR_NET_PLAYERS = $cfg.friends; WPR_NET_NAME = $cfg.name; WPR_NET_LOCAL = $cfg.local }
@@ -466,6 +902,7 @@ $joinBtn.Add_Click({
 })
 
 $form.Add_FormClosing({ Read-Settings; Save-Settings })
+Show-Page 'Play'
 [void](Update-GameStatus)
 [void]$form.ShowDialog()
 
