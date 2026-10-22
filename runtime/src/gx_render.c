@@ -1084,6 +1084,14 @@ static void triangle(const GxPipeVertex* v0, const GxPipeVertex* v1, const GxPip
     if (fabsf(area) < 1e-8f) return;
     int cull = (int)((g_bp[0x00] >> 14) & 3);
     if (cull == 3 && !drawing_lines) return;  /* "cull all" hides triangles, not lines and points */
+    if ((cull == 1 || cull == 2) && !drawing_lines) {
+        /* BP cull mode 1 hides back faces, 2 front faces (GXSetCullMode swaps the API's values). The
+         * winding is judged in clip space, so the viewport's y flip doesn't change it. Globe Trot
+         * relies on this to hide the routes on the far side of the globe. */
+        float wh = xff(0x101A) * xff(0x101B);
+        int front = (wh < 0 ? area : -area) > 0;
+        if (cull == (front ? 2 : 1)) return;
+    }
     int cx0, cy0, cx1, cy1;
     scissor(&cx0, &cy0, &cx1, &cy1);
     int minx = (int)floorf(fminf(sx[0], fminf(sx[1], sx[2]))), maxx = (int)ceilf(fmaxf(sx[0], fmaxf(sx[1], sx[2])));
@@ -1094,6 +1102,40 @@ static void triangle(const GxPipeVertex* v0, const GxPipeVertex* v1, const GxPip
     if (maxy > cy1) maxy = cy1;
     g_draw_count++;
     if (minx >= maxx || miny >= maxy) return;
+    {   /* test runs: WPR_PICK names a file holding "x y"; every 30th frame, log the triangles over that pixel */
+        static const char* pick; static int checked, px = -1, py = -1, logged; static uint64_t at = ~0ull;
+        if (!checked) { pick = getenv("WPR_PICK"); checked = 1; }
+        if (pick && g_xfb_copies % 30 == 0) {
+            if (at != g_xfb_copies) {
+                at = g_xfb_copies; logged = 0; px = py = -1;
+                FILE* f = fopen(pick, "r"); if (f) { if (fscanf(f, "%d %d", &px, &py) != 2) px = -1; fclose(f); }
+            }
+            float e[3];
+            for (int i = 0; i < 3; i++) {
+                int j = (i + 1) % 3;
+                e[i] = (sx[j] - sx[i]) * (py + 0.5f - sy[i]) - (sy[j] - sy[i]) * (px + 0.5f - sx[i]);
+            }
+            if (px >= 0 && logged < 60 && ((e[0] >= 0 && e[1] >= 0 && e[2] >= 0) || (e[0] <= 0 && e[1] <= 0 && e[2] <= 0))) {
+                logged++;
+                fprintf(stderr, "[pick] f%llu d%llu gen %06X z %03X blend %04X alpha %06X chan %X/%X mat %08X amb %08X z %.5f %.5f %.5f\n",
+                        (unsigned long long)g_xfb_copies, (unsigned long long)g_draw_count, g_bp[0] & 0xFFFFFF, g_bp[0x40] & 0xFFF, g_bp[0x41] & 0xFFFF,
+                        g_bp[0xF3] & 0xFFFFFF, g_xf[0x100E], g_xf[0x1010], g_xf[0x100C], g_xf[0x100A], sz[0], sz[1], sz[2]);
+                for (int i = 0; i < 3; i++)
+                    fprintf(stderr, "[pick]   v%d col0 %.0f %.0f %.0f %.0f col1 %.0f %.0f %.0f %.0f tc0 %.3f %.3f\n", i,
+                            v[i]->col[0][0], v[i]->col[0][1], v[i]->col[0][2], v[i]->col[0][3],
+                            v[i]->col[1][0], v[i]->col[1][1], v[i]->col[1][2], v[i]->col[1][3], v[i]->tc[0][0], v[i]->tc[0][1]);
+                int ns = (int)((g_bp[0] >> 10) & 15) + 1;
+                for (int i = 0; i < ns; i++)
+                    fprintf(stderr, "[pick]   stage %d order %03X c %06X a %06X ksel %06X\n", i,
+                            (g_bp[0x28 + i / 2] >> (12 * (i & 1))) & 0xFFF, g_bp[0xC0 + 2 * i] & 0xFFFFFF, g_bp[0xC1 + 2 * i] & 0xFFFFFF,
+                            g_bp[0xF6 + i / 2] & 0xFFFFFF);
+                fprintf(stderr, "[pick]   regs %06X %06X %06X %06X %06X %06X %06X %06X tex0 img %06X base %06X mode %06X\n",
+                        g_bp[0xE0] & 0xFFFFFF, g_bp[0xE1] & 0xFFFFFF, g_bp[0xE2] & 0xFFFFFF, g_bp[0xE3] & 0xFFFFFF,
+                        g_bp[0xE4] & 0xFFFFFF, g_bp[0xE5] & 0xFFFFFF, g_bp[0xE6] & 0xFFFFFF, g_bp[0xE7] & 0xFFFFFF,
+                        g_bp[0x88] & 0xFFFFFF, g_bp[0x94] & 0xFFFFFF, g_bp[0x80] & 0xFFFFFF);
+            }
+        }
+    }
 
     const RasterState* rs = current_state();
     if (nworkers == 0 && gx_gl_active()) {

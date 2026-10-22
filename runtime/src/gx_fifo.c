@@ -180,13 +180,23 @@ static void decode_vertex(const uint8_t** pp, int vat, GxRawVertex* v) {
 
 extern uint64_t g_xfb_copies;
 
+static uint32_t cur_dl;  /* the display list being decoded, for traces */
+
 static void draw(uint8_t cmd, const uint8_t* data, int n) {
     int vat = cmd & 7, prim = cmd & 0xF8;
     static GxPipeVertex pv[0x10000];
+    static const char* trace_tex; static int checked;
+    if (!checked) { trace_tex = getenv("WPR_TRACE_TEX"); checked = 1; }
+    int trace = trace_tex && g_xfb_copies % 60 == 0 && (g_bp[0x94] & 0xFFFFFF) == strtoul(trace_tex, NULL, 16);
     for (int i = 0; i < n; i++) {
         GxRawVertex rv;
         decode_vertex(&data, vat, &rv);
         gx_vertex(&rv, &pv[i]);
+        if (trace && (i == 0 || i == n - 1))
+            fprintf(stderr, "[tex] f%llu dl %08X prim %02X n %d v%d pos %.1f %.1f %.1f mtx %d clip %.1f %.1f %.1f %.1f tc %.2f %.2f\n",
+                    (unsigned long long)g_xfb_copies, cur_dl, prim, n, i, rv.pos[0], rv.pos[1], rv.pos[2],
+                    rv.has_pnmtx ? rv.pnmtx : (int)(g_cp_matidx_a & 63), pv[i].clip[0], pv[i].clip[1], pv[i].clip[2], pv[i].clip[3],
+                    pv[i].tc[0][0], pv[i].tc[0][1]);
     }
     switch (prim) {
     case 0x80: case 0x88: /* quads */
@@ -313,7 +323,9 @@ static size_t decode(const uint8_t* buf, size_t len, int depth) {
             if (p + need > len) break;
             uint32_t addr = rd32(buf + p + 1), size = rd32(buf + p + 5);
             stats.display_lists++;
+            uint32_t outer = cur_dl; cur_dl = addr;
             if (depth < 4 && size < 0x1000000) decode(g_mem + PPC_PHYS(0x80000000u | addr), size, depth + 1);
+            cur_dl = outer;
         } else if (cmd == 0x61) {
             need = 5;
             if (p + need > len) break;
