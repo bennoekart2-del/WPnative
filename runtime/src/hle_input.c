@@ -78,6 +78,30 @@ static int scripted_pointer(int chan, unsigned n, float* x, float* y) {
     return hit;
 }
 
+/* WPR_CTRL=file drives player 1 by hand in headless test runs: the file holds "<n> <keys> <x> <y>";
+ * each new n presses the keys for 8 reads, and the pointer stays at x,y. */
+static void live_control(unsigned n, uint16_t* b, float* x, float* y) {
+    static const char* path;
+    static int checked, last = -1;
+    static unsigned until;
+    static uint16_t keys;
+    static float lx, ly;
+    if (!checked) { path = getenv("WPR_CTRL"); checked = 1; }
+    if (!path) return;
+    FILE* f = fopen(path, "r");
+    if (f) {
+        int seq; char k[16] = ""; float fx, fy;
+        if (fscanf(f, "%d %15s %f %f", &seq, k, &fx, &fy) == 4 && seq != last) {
+            last = seq; keys = 0;
+            for (const char* q = k; *q; q++) keys |= key_bit(*q);
+            until = n + 8; lx = fx; ly = fy;
+        }
+        fclose(f);
+    }
+    if (n < until) *b |= keys;
+    if (last >= 0) { *x = lx; *y = ly; }
+}
+
 /* What player chan is doing: in an online game, the input every player agreed on for this frame. */
 static const HostRemote* remote(int chan) { return net_active() ? net_remote(chan) : platform_remote(chan); }
 
@@ -121,6 +145,7 @@ void hle_KPADReadEx(PPCContext* c) {
     uint16_t old = prev[chan].hold;
     float px = r->ir_x, py = r->ir_y;
     if (!net_active()) scripted_pointer(chan, reads[0], &px, &py);
+    if (!net_active() && chan == 0) live_control(reads[0], &hold, &px, &py);
     float vx = px - prev[chan].pos[0], vy = py - prev[chan].pos[1];
 
     for (uint32_t i = 0; i < KPAD_STATUS_SIZE; i += 4) mem_w32(buf + i, 0);

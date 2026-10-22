@@ -86,6 +86,41 @@ static void build_disc_map(void) {
     fprintf(stderr, "[di] disc map: %d files\n", n_files);
 }
 
+/* WPR_STANDIN=1 (test runs on a partial copy of the disc): a missing file is read from another
+ * file of the same kind in its folder or a sibling folder, one that is no bigger. */
+static FILE* standin(const char* path, uint64_t size) {
+    static int on = -1;
+    if (on < 0) on = getenv("WPR_STANDIN") != NULL;
+    if (!on) return NULL;
+    const char* slash = strrchr(path, '/');
+    const char* ext = slash ? strchr(slash, '.') : NULL;
+    if (!slash || !ext) return NULL;
+    char dir[512], best[1024] = "";
+    uint64_t best_size = 0;
+    snprintf(dir, sizeof dir, "%.*s", (int)(slash - path), path);
+    for (int up = 0; up < 2 && !best[0]; up++) {
+        char root[512];
+        snprintf(root, sizeof root, "%s", dir);
+        if (up) { char* q = strrchr(root, '/'); if (!q) break; *q = 0; }
+        char cmd[1200];
+        snprintf(cmd, sizeof cmd, "find '%s' -maxdepth %d -type f -name '*%s' 2>/dev/null", root, up ? 2 : 1, ext);
+        FILE* l = popen(cmd, "r");
+        if (!l) break;
+        char cand[1024];
+        while (fgets(cand, sizeof cand, l)) {
+            cand[strcspn(cand, "\n")] = 0;
+            struct stat st;
+            if (stat(cand, &st) == 0 && (uint64_t)st.st_size <= size && (uint64_t)st.st_size > best_size) {
+                best_size = (uint64_t)st.st_size; snprintf(best, sizeof best, "%s", cand);
+            }
+        }
+        pclose(l);
+    }
+    if (!best[0]) return NULL;
+    fprintf(stderr, "[di] %s stands in for %s\n", best, path);
+    return fopen(best, "rb");
+}
+
 static void disc_read(uint32_t dst, uint32_t len, uint64_t off) {
     zero_out(dst, len);
     for (int i = 0; i < n_files; i++) {
@@ -94,6 +129,7 @@ static void disc_read(uint32_t dst, uint32_t len, uint64_t off) {
         if (!size) { struct stat st; if (stat(f->path, &st) == 0) size = f->size = (uint64_t)st.st_size; }
         if (off + len <= f->off || off >= f->off + size) continue;
         FILE* h = fopen(f->path, "rb");
+        if (!h) h = standin(f->path, size);
         if (!h) { fprintf(stderr, "[di] missing file %s\n", f->path); continue; }
         if (getenv("WPR_TRACE_DISC")) fprintf(stderr, "[di] read %s +%llX len %X\n", f->path, (unsigned long long)(off > f->off ? off - f->off : 0), len);
         uint64_t lo = off > f->off ? off : f->off, hi = (off + len < f->off + size) ? off + len : f->off + size;

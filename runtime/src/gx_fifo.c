@@ -178,6 +178,8 @@ static void decode_vertex(const uint8_t** pp, int vat, GxRawVertex* v) {
     *pp = p;
 }
 
+extern uint64_t g_xfb_copies;
+
 static void draw(uint8_t cmd, const uint8_t* data, int n) {
     int vat = cmd & 7, prim = cmd & 0xF8;
     static GxPipeVertex pv[0x10000];
@@ -205,9 +207,21 @@ static void draw(uint8_t cmd, const uint8_t* data, int n) {
     case 0xA8: case 0xB0: case 0xB8: {
         static int told;
         if (!told++) fprintf(stderr, "[gx] the game draws lines or points (primitive %02X, width %u)\n", prim, (unsigned)(g_bp[0x22] & 0xFFFF));
+        if (getenv("WPR_TRACE_LINES") && g_xfb_copies % 200 == 0)
+            fprintf(stderr, "[lines] f%llu prim %02X n %d size %04X cull %u z %03X blend %04X tev %u alpha %06X col0 %.2f %.2f %.2f %.2f tex %d v0 %.2f %.2f %.2f %.2f\n",
+                    (unsigned long long)g_xfb_copies, prim, n, (unsigned)(g_bp[0x22] & 0xFFFF), (unsigned)((g_bp[0] >> 14) & 3),
+                    (unsigned)g_bp[0x40] & 0xFFF, (unsigned)g_bp[0x41] & 0xFFFF, (unsigned)((g_bp[0] >> 10) & 15) + 1, (unsigned)g_bp[0xF3] & 0xFFFFFF,
+                    pv[0].col[0][0], pv[0].col[0][1], pv[0].col[0][2], pv[0].col[0][3], pv[0].ntex,
+                    pv[0].clip[0], pv[0].clip[1], pv[0].clip[2], pv[0].clip[3]);
         break;
     }
     default: break;
+    }
+    {   /* test runs: while the file WPR_NO_LINES names exists, lines and points are skipped */
+        static const char* off; static int checked, skip; static uint64_t at;
+        if (!checked) { off = getenv("WPR_NO_LINES"); checked = 1; }
+        if (off && g_xfb_copies != at) { FILE* t = fopen(off, "r"); skip = t != NULL; if (t) fclose(t); at = g_xfb_copies; }
+        if (skip && prim >= 0xA8) return;
     }
     switch (prim) {
     case 0xA8: /* lines */
