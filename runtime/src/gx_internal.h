@@ -29,6 +29,8 @@ typedef struct {
 
 void gx_vertex(const GxRawVertex* rv, GxPipeVertex* out);
 void gx_triangle(const GxPipeVertex* v0, const GxPipeVertex* v1, const GxPipeVertex* v2);
+void gx_line(const GxPipeVertex* a, const GxPipeVertex* b);
+void gx_point(const GxPipeVertex* v);
 void gx_efb_copy(uint32_t trigger);
 void gx_load_tlut(void);
 void gx_invalidate_textures(void);

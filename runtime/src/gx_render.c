@@ -995,6 +995,7 @@ static int render_every(void) {
 }
 
 static void triangle(const GxPipeVertex* v0, const GxPipeVertex* v1, const GxPipeVertex* v2);
+static int drawing_lines;
 
 /* Near-plane clipping. GX clip space has z/w from -1 (near) to 0 (far), so the near plane is
  * z + w = 0 (with a hair of slack for 2D drawn exactly at the near plane). Big ground polygons usually reach behind the camera; dropping them left floors black. */
@@ -1027,6 +1028,49 @@ void gx_triangle(const GxPipeVertex* v0, const GxPipeVertex* v1, const GxPipeVer
     for (int i = 1; i + 1 < n; i++) triangle(&out[0], &out[i], &out[i + 1]);
 }
 
+/* Lines and points are drawn as quads, the way the hardware widens them: BP 0x22 holds the line
+ * width (bits 0-7) and point size (bits 8-15) in sixths of a pixel. A line that runs more across
+ * than up is widened vertically, otherwise horizontally. Sizes are in EFB pixels, so they scale with
+ * the picture. */
+static void quad_offsets(const GxPipeVertex* v, float px, float py, GxPipeVertex* out) {
+    float wd = fabsf(xff(0x101A)), ht = fabsf(xff(0x101B));
+    *out = *v;
+    if (wd > 0) out->clip[0] += px / wd * v->clip[3];
+    if (ht > 0) out->clip[1] += py / ht * v->clip[3];
+}
+
+void gx_line(const GxPipeVertex* a, const GxPipeVertex* b) {
+    float w = (float)(g_bp[0x22] & 0xFF) / 6.0f;
+    if (w <= 0 || a->clip[3] <= 1e-6f || b->clip[3] <= 1e-6f) return;
+    float dx = xff(0x101A) * (b->clip[0] / b->clip[3] - a->clip[0] / a->clip[3]);
+    float dy = xff(0x101B) * (b->clip[1] / b->clip[3] - a->clip[1] / a->clip[3]);
+    float ox = 0, oy = 0;
+    if (fabsf(dx) >= fabsf(dy)) oy = w / 2; else ox = w / 2;
+    GxPipeVertex q[4];
+    quad_offsets(a, -ox, -oy, &q[0]);
+    quad_offsets(a, ox, oy, &q[1]);
+    quad_offsets(b, -ox, -oy, &q[2]);
+    quad_offsets(b, ox, oy, &q[3]);
+    drawing_lines = 1;
+    gx_triangle(&q[0], &q[1], &q[2]);
+    gx_triangle(&q[1], &q[3], &q[2]);
+    drawing_lines = 0;
+}
+
+void gx_point(const GxPipeVertex* v) {
+    float h = (float)((g_bp[0x22] >> 8) & 0xFF) / 12.0f;
+    if (h <= 0 || v->clip[3] <= 1e-6f) return;
+    GxPipeVertex q[4];
+    quad_offsets(v, -h, -h, &q[0]);
+    quad_offsets(v, h, -h, &q[1]);
+    quad_offsets(v, -h, h, &q[2]);
+    quad_offsets(v, h, h, &q[3]);
+    drawing_lines = 1;
+    gx_triangle(&q[0], &q[1], &q[2]);
+    gx_triangle(&q[1], &q[3], &q[2]);
+    drawing_lines = 0;
+}
+
 static void triangle(const GxPipeVertex* v0, const GxPipeVertex* v1, const GxPipeVertex* v2) {
     if (nworkers < 0) raster_init();
     const GxPipeVertex* v[3] = {v0, v1, v2};
@@ -1039,7 +1083,7 @@ static void triangle(const GxPipeVertex* v0, const GxPipeVertex* v1, const GxPip
     float area = (sx[1] - sx[0]) * (sy[2] - sy[0]) - (sx[2] - sx[0]) * (sy[1] - sy[0]);
     if (fabsf(area) < 1e-8f) return;
     int cull = (int)((g_bp[0x00] >> 14) & 3);
-    if (cull == 3) return;
+    if (cull == 3 && !drawing_lines) return;  /* "cull all" hides triangles, not lines and points */
     int cx0, cy0, cx1, cy1;
     scissor(&cx0, &cy0, &cx1, &cy1);
     int minx = (int)floorf(fminf(sx[0], fminf(sx[1], sx[2]))), maxx = (int)ceilf(fmaxf(sx[0], fmaxf(sx[1], sx[2])));

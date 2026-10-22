@@ -202,7 +202,24 @@ static void draw(uint8_t cmd, const uint8_t* data, int n) {
     case 0xA0:
         for (int i = 1; i + 1 < n; i++) gx_triangle(&pv[0], &pv[i], &pv[i + 1]);
         break;
-    default: break; /* lines and points: not needed for the boot screens yet */
+    case 0xA8: case 0xB0: case 0xB8: {
+        static int told;
+        if (!told++) fprintf(stderr, "[gx] the game draws lines or points (primitive %02X, width %u)\n", prim, (unsigned)(g_bp[0x22] & 0xFFFF));
+        break;
+    }
+    default: break;
+    }
+    switch (prim) {
+    case 0xA8: /* lines */
+        for (int i = 0; i + 1 < n; i += 2) gx_line(&pv[i], &pv[i + 1]);
+        break;
+    case 0xB0: /* line strip */
+        for (int i = 0; i + 1 < n; i++) gx_line(&pv[i], &pv[i + 1]);
+        break;
+    case 0xB8: /* points */
+        for (int i = 0; i < n; i++) gx_point(&pv[i]);
+        break;
+    default: break;
     }
 }
 
