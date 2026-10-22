@@ -1,9 +1,10 @@
 Wii Party (native) - controls
 =============================
 
-One player per device. The keyboard and mouse are player 1. Every gamepad you plug in
-(Xbox, PlayStation, Switch) is the next player: the first is player 2, then 3, then 4.
-A player with no device is treated as a Remote that isn't connected.
+One player per PC: the keyboard, the mouse and one gamepad (Xbox, PlayStation, Switch)
+all play player 1. For more players on this PC, pick 2-4 in the launcher (Settings >
+Players on this PC); gamepads are then players 2, 3 and 4. A gamepad joins when you
+press a button on it. Online, friends are players 2-4.
 
 Player 1: keyboard and mouse (every key can be changed in the launcher)
   Pointer                  Mouse (or the arrow keys once the mouse has been still for 3 seconds)
@@ -17,7 +18,7 @@ Player 1: keyboard and mouse (every key can be changed in the launcher)
   Turn left / right        Q / E
   Upright or sideways grip F1
 
-Players 2-4: gamepad
+Gamepad
   A / Cross = A, B / Circle = B, X = 1, Y = 2, Start = +, Back = -, Guide = HOME,
   D-pad = D-pad, right stick = pointer, left stick = tilt, left shoulder = shake,
   right shoulder = B.

@@ -8,10 +8,14 @@ $ProgressPreference = 'SilentlyContinue'
 Add-Type -AssemblyName System.Windows.Forms
 
 $kit = Split-Path -Parent $MyInvocation.MyCommand.Path
-$src = Join-Path $kit 'source'
-$tools = Join-Path $kit 'tools'
-$work = Join-Path $kit 'work'
-$out = Join-Path $kit 'Wii Party'
+if (Test-Path (Join-Path $kit 'source\CMakeLists.txt')) {
+    $src = Join-Path $kit 'source'; $base = $kit  # the kit zip: the source is in source\
+} else {
+    $src = Split-Path -Parent $kit; $base = $src  # downloaded straight from GitHub: this is the repository's kit\ folder
+}
+$tools = Join-Path $base 'tools'
+$work = Join-Path $base 'work'
+$out = Join-Path $base 'Wii Party'
 
 $downloads = @{
     python = @('https://www.python.org/ftp/python/3.12.7/python-3.12.7-embed-amd64.zip', 'python.zip')
@@ -46,8 +50,8 @@ function Resolve-GameFolder([string]$p) {
     return $null
 }
 
-if ($kit -match '\s') {  # the compiler tools trip over spaces in folder names
-    Stop-Build "Please move this kit to a folder without spaces in its name, for example C:\WiiPartyKit, and start it again from there.`r`n`r`nNow it is in:`r`n$kit"
+if ($base -match '\s') {  # the compiler tools trip over spaces in folder names
+    Stop-Build "Please move this kit to a folder without spaces in its name, for example C:\WiiPartyKit, and start it again from there.`r`n`r`nNow it is in:`r`n$base"
 }
 
 Write-Host 'Build Wii Party' -ForegroundColor Green
@@ -57,7 +61,7 @@ Write-Host 'needs about 6 GB of free disc space. You can keep using your PC mean
 
 # ------------------------------------------------------------------ the game folder
 Step 'Finding your game folder'
-$saved = Join-Path $kit 'game-folder.txt'
+$saved = Join-Path $base 'game-folder.txt'
 $game = if (Test-Path $saved) { Resolve-GameFolder (Get-Content $saved -Raw).Trim() } else { $null }
 if (-not $game) {
     [void][System.Windows.Forms.MessageBox]::Show(("Choose the folder with your Wii Party disc in it.`r`n`r`n" +
