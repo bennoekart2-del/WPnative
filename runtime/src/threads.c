@@ -23,7 +23,7 @@
 #include "runtime.h"
 #include "det.h"
 
-#define MAX_THREADS 256
+#define MAX_THREADS 1024
 
 typedef struct {
     uint32_t ctx;          /* guest OSContext address this host thread owns */
@@ -39,6 +39,7 @@ typedef struct {
     uint32_t last_setjmp;  /* guest buffer of this thread's latest setjmp: where it is parked */
     void* top[5];          /* host buffer at the coroutine thread's base, for restarts */
     int dead;              /* its guest thread ran OSExitThread: it never runs again */
+    int parked;            /* a coroutine waiting in coro_switch for its next command */
 } GuestThread;
 
 enum { CORO_NONE, CORO_RESUME, CORO_START };
@@ -214,6 +215,15 @@ static JmpSlot* jslot(uint32_t buf, int create) {
     for (int i = 0; i < MAX_JMP; i++) if (jslots[i].buf == buf) return &jslots[i];
     if (!create) return NULL;
     for (int i = 0; i < MAX_JMP; i++) if (!jslots[i].buf) { jslots[i].buf = buf; return &jslots[i]; }
+    /* full: take a slot whose buffer no longer holds its setjmp, so nothing can resume through it */
+    for (int i = 0; i < MAX_JMP; i++) {
+        JmpSlot* s = &jslots[i];
+        if (mem_r32(s->buf) != s->lr || mem_r32(s->buf + 8) != s->sp) {
+            *s = (JmpSlot){0};
+            s->buf = buf;
+            return s;
+        }
+    }
     fprintf(stderr, "[coro] out of jmp_buf slots\n");
     abort();
 }
@@ -267,8 +277,30 @@ static int SDLCALL coro_main(void* arg) {
 static void coro_switch(GuestThread* me, GuestThread* t) {
     t->ctx = me->ctx;
     me->ctx = 0;
+    me->parked = 1;
     switch_to(t);
+    me->parked = 0;
     coro_dispatch(me);
+}
+
+/* A parked coroutine that no jmp_buf can resume any more: its task is gone, so its host thread can
+ * run the next new task. Without this every task the game ever started kept a thread, and after a
+ * dozen minigames the table ran out ("too many guest threads"). */
+static GuestThread* idle_coro(GuestThread* me) {
+    for (int i = 0; i < MAX_THREADS; i++) {
+        GuestThread* u = &threads[i];
+        if (!u->used || !u->is_coro || !u->parked || u == me) continue;
+        /* a buffer resumes its owner only while it still holds the LR/SP of that setjmp */
+        int owned = 0;
+        for (int j = 0; j < MAX_JMP && !owned; j++) {
+            JmpSlot* s = &jslots[j];
+            owned = s->owner == u && mem_r32(s->buf) == s->lr && mem_r32(s->buf + 8) == s->sp;
+        }
+        if (owned) continue;
+        for (int j = 0; j < MAX_JMP; j++) if (jslots[j].owner == u) jslots[j].owner = NULL;
+        return u;
+    }
+    return NULL;
 }
 
 void hle_longjmp(PPCContext* c) {
@@ -294,6 +326,7 @@ void hle_longjmp(PPCContext* c) {
     if (s) s->owner = NULL;
     if (t)  /* its stack is abandoned: none of its other buffers can be resumed in place */
         for (int i = 0; i < MAX_JMP; i++) if (jslots[i].owner == t) jslots[i].owner = NULL;
+    if (!t) t = idle_coro(me);
     int fresh = t == NULL;
     if (fresh) {
         t = alloc_thread(0, calloc(1, sizeof(PPCContext)));

@@ -994,6 +994,8 @@ static int render_every(void) {
     return every;
 }
 
+int g_gx_no_cull;  /* F8: draw faces the game asks to hide */
+
 static void triangle(const GxPipeVertex* v0, const GxPipeVertex* v1, const GxPipeVertex* v2);
 static int drawing_lines;
 
@@ -1082,7 +1084,7 @@ static void triangle(const GxPipeVertex* v0, const GxPipeVertex* v1, const GxPip
     }
     float area = (sx[1] - sx[0]) * (sy[2] - sy[0]) - (sx[2] - sx[0]) * (sy[1] - sy[0]);
     if (fabsf(area) < 1e-8f) return;
-    int cull = (int)((g_bp[0x00] >> 14) & 3);
+    int cull = g_gx_no_cull ? 0 : (int)((g_bp[0x00] >> 14) & 3);
     if (cull == 3 && !drawing_lines) return;  /* "cull all" hides triangles, not lines and points */
     if ((cull == 1 || cull == 2) && !drawing_lines) {
         /* BP cull mode 1 hides back faces, 2 front faces (GXSetCullMode swaps the API's values). The

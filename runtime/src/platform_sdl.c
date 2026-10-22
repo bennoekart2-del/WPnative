@@ -16,6 +16,8 @@
 
 #include "gx_gl.h"
 
+extern int g_gx_no_cull;  /* gx_render.c */
+
 #include "netplay.h"
 #include "runtime.h"
 
@@ -407,6 +409,10 @@ int platform_pump(void) {
             if (e.key.scancode == SDL_SCANCODE_F1 || e.key.scancode == p1_keys.grip) {
                 sideways = !sideways;
                 platform_set_fps(-1);
+            }
+            if (e.key.scancode == SDL_SCANCODE_F8) {  /* draw hidden faces too, to check a graphics bug */
+                g_gx_no_cull = !g_gx_no_cull;
+                fprintf(stderr, "[gx] face culling %s (F8)\n", g_gx_no_cull ? "off" : "on");
             }
             if (e.key.scancode == SDL_SCANCODE_F11)
                 SDL_SetWindowFullscreen(window, !(SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN));
