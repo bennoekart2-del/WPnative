@@ -271,7 +271,7 @@ $actions = @(
 )
 
 $cfg = @{ disc = ''; scale = 'Auto'; aspect = '16:9'; fullscreen = '1'; sideways = '0'
-         name = $env:USERNAME; local = '0'; friends = '1'; port = '47123'; join = '' }
+         name = $env:USERNAME; players = '1'; friends = '1'; port = '47123'; join = '' }
 foreach ($a in $actions) { $cfg['key_' + $a[0]] = $a[2] }
 if (Test-Path $ini) {
     foreach ($line in Get-Content $ini) {
@@ -564,8 +564,8 @@ $gameStatus = Add-Text $pPlay '' 80 364 430 42 $fBody
 $findBtn = Add-Pill $pPlay 'Find my game' 80 410 136 36 'blue' (New-Font 13 'Bold')
 $chooseBtn = Add-Pill $pPlay 'Choose folder...' 222 410 136 36 'white' (New-Font 13 'Bold')
 $noGameBtn = Add-Pill $pPlay "I don't have it yet" 364 410 144 36 'white' (New-Font 13 'Bold')
-Add-Text $pPlay ("Player 1: keyboard and mouse. Point with the mouse, left click = A, right click = B.`r`n" +
-    "Players 2, 3 and 4: plug in gamepads (Xbox, PlayStation, Switch) before you press PLAY.") 80 488 430 60 $fSmall | Out-Null
+Add-Text $pPlay ("Keyboard and mouse: point with the mouse, left click = A, right click = B. " +
+    "A gamepad works too: press a button on it once the game is open. More players on this PC: see Settings.") 80 488 430 60 $fSmall | Out-Null
 Add-Text $pPlay "In the game: F11 = full screen, F1 = hold the Remote sideways or upright." 48 552 460 36 $fSmall $muted | Out-Null
 $play = Add-Pill $pPlay 'PLAY' 544 376 182 100 'pink' (New-Font 38 'Bold')
 $playStatus = Add-Text $pPlay '' 540 488 190 96 $fSmall $muted
@@ -637,10 +637,7 @@ Add-Text $pOnline 'Your name' 44 124 240 22 $fBold | Out-Null
 $netName = Add-Box $pOnline 44 150 240 30
 $netName.Text = $cfg.name
 Add-Text $pOnline 'Players on this PC' 300 124 264 22 $fBold | Out-Null
-$localChoices = @(@('0', '1 player: keyboard and mouse'), @('1', '1 player: gamepad'), @('0,1', '2 players: keyboard + 1 gamepad'),
-    @('1,2', '2 players: 2 gamepads'), @('0,1,2', '3 players'), @('0,1,2,3', '4 players'))
-$netLocal = Add-Choice $pOnline 300 150 264 @($localChoices | ForEach-Object { $_[1] })
-$netLocal.SelectedIndex = [Math]::Max(0, [Array]::IndexOf(@($localChoices | ForEach-Object { $_[0] }), $cfg.local))
+$netPlayers = Add-Text $pOnline '' 300 152 264 44 $fSmall $muted
 
 Add-Text $pOnline 'Friends joining' 44 266 130 26 $fBody | Out-Null
 $netFriends = Add-Choice $pOnline 180 262 70 @('1', '2', '3')
@@ -696,7 +693,7 @@ $pSet = New-Page 'Settings' {
     param($g)
     Draw-PageBack $g 31
     Write-Art $g 'Settings' 30 18 32
-    [WPR.Art]::Card($g, (RF 24 96 440 344), 18, $white)
+    [WPR.Art]::Card($g, (RF 24 96 440 416), 18, $white)
     if ($imgCase) {
         [WPR.Art]::Ring($g, (PF 618 300), 160, 22, (Rgb 255 255 255 150))
         [void][WPR.Art]::Contain($g, $imgCase, (RF 480 110 276 360), 1)
@@ -706,18 +703,22 @@ Add-Text $pSet 'Picture quality' 44 112 400 24 $fBold | Out-Null
 $scale = Add-Choice $pSet 44 138 400 @('Automatic (recommended)', 'Original (fastest, blurry)', 'Sharp (2x)', 'Sharper (3x, good for 1080p)',
     'Very sharp (4x)', 'Ultra (5x, good for 4K)', 'Maximum (6x, needs a strong PC)')
 $scale.SelectedIndex = if ($cfg.scale -match '^[1-6]$') { [int]$cfg.scale } else { 0 }
-Add-Text $pSet 'Screen shape' 44 184 400 24 $fBold | Out-Null
-$aspect = Add-Choice $pSet 44 210 400 @('Widescreen 16:9 (recommended)', 'Old TV 4:3')
+Add-Text $pSet 'Players on this PC' 44 184 400 24 $fBold | Out-Null
+$players = Add-Choice $pSet 44 210 400 @('1 player (recommended)', '2 players: keyboard + 1 gamepad',
+    '3 players: keyboard + 2 gamepads', '4 players: keyboard + 3 gamepads')
+$players.SelectedIndex = if ($cfg.players -match '^[1-4]$') { [int]$cfg.players - 1 } else { 0 }
+Add-Text $pSet 'Screen shape' 44 256 400 24 $fBold | Out-Null
+$aspect = Add-Choice $pSet 44 282 400 @('Widescreen 16:9 (recommended)', 'Old TV 4:3')
 $aspect.SelectedIndex = if ($cfg.aspect -eq '4:3') { 1 } else { 0 }
 $full = New-Object System.Windows.Forms.CheckBox
 $full.Text = 'Start in full screen (F11 switches in the game)'; $full.BackColor = $clear; $full.ForeColor = $ink
-Set-Bounds $full 44 256 400 28; $full.Checked = $cfg.fullscreen -eq '1'; $pSet.Controls.Add($full)
+Set-Bounds $full 44 328 400 28; $full.Checked = $cfg.fullscreen -eq '1'; $pSet.Controls.Add($full)
 $side = New-Object System.Windows.Forms.CheckBox
 $side.Text = 'Start with the Remote held sideways (F1 switches)'; $side.BackColor = $clear; $side.ForeColor = $ink
-Set-Bounds $side 44 288 400 28; $side.Checked = $cfg.sideways -eq '1'; $pSet.Controls.Add($side)
-Add-Text $pSet "If the game is slow, pick a lower picture quality. 'Automatic' picks what suits your screen." 44 326 400 44 $fSmall $muted | Out-Null
-$resetAll = Add-Pill $pSet 'Back to recommended settings' 44 380 280 40 'white'
-$resetAll.Add_Click({ $scale.SelectedIndex = 0; $aspect.SelectedIndex = 0; $full.Checked = $true; $side.Checked = $false })
+Set-Bounds $side 44 360 400 28; $side.Checked = $cfg.sideways -eq '1'; $pSet.Controls.Add($side)
+Add-Text $pSet "If the game is slow, pick a lower picture quality. 'Automatic' picks what suits your screen." 44 398 400 44 $fSmall $muted | Out-Null
+$resetAll = Add-Pill $pSet 'Back to recommended settings' 44 452 280 40 'white'
+$resetAll.Add_Click({ $scale.SelectedIndex = 0; $players.SelectedIndex = 0; $aspect.SelectedIndex = 0; $full.Checked = $true; $side.Checked = $false })
 
 # ---- Controls page
 $pKeys = New-Page 'Controls' {
@@ -776,7 +777,7 @@ $help.Multiline = $true; $help.ReadOnly = $true; $help.ScrollBars = 'Vertical'; 
 $help.BackColor = $white; $help.ForeColor = $ink; $help.Font = $fBody
 Set-Bounds $help 48 100 678 480
 $help.Text = ("HOW TO START`r`n" +
-    "1. On the Play page, press 'Find my game'.`r`n2. Plug in any gamepads.`r`n3. Press PLAY.`r`n`r`n" +
+    "1. On the Play page, press 'Find my game'.`r`n2. Press PLAY.`r`n3. Playing with a gamepad: press a button on it once the game is open.`r`n`r`n" +
     "GETTING THE GAME FOLDER`r`n" + $extractHelp + "`r`n`r`n" +
     "IN THE GAME`r`n" +
     "Mouse = pointer. Left click = A, right click = B.`r`n" +
@@ -786,7 +787,7 @@ $help.Text = ("HOW TO START`r`n" +
     "F11 = full screen on/off. Close the window to quit.`r`n`r`n" +
     "SOMETHING WRONG?`r`n" +
     "- The game is slow: Settings > Picture quality > Original.`r`n" +
-    "- A gamepad does nothing: plug it in before pressing PLAY.`r`n" +
+    "- A gamepad does nothing: press a button on it. For more than one player on this PC, pick the number under Settings.`r`n" +
     "- The game closed by itself: send the file log.txt from this folder to the person who helps you.`r`n" +
     "- Windows said 'Windows protected your PC': press 'More info' and then 'Run anyway'.`r`n`r`n" +
     "PLAYING ONLINE`r`nSee the Online page: one person presses HOST, the others type the room code and press JOIN.")
@@ -802,6 +803,10 @@ function Show-Page([string]$name) {
         else { $b.Color1 = $clear; $b.Color2 = $clear; $b.Fore = $white; $b.Hover = Rgb 255 255 255 45 }
         $b.Invalidate()
     }
+    if ($name -eq 'Online') {
+        $n = $players.SelectedIndex + 1
+        $netPlayers.Text = $(if ($n -eq 1) { '1 player (change it under Settings)' } else { "$n players (change it under Settings)" })
+    }
     $form.ActiveControl = $null
 }
 
@@ -812,7 +817,7 @@ function Read-Settings {
     $cfg.fullscreen = if ($full.Checked) { '1' } else { '0' }
     $cfg.sideways = if ($side.Checked) { '1' } else { '0' }
     $cfg.name = $netName.Text.Trim()
-    $cfg.local = $localChoices[[Math]::Max(0, $netLocal.SelectedIndex)][0]
+    $cfg.players = [string]($players.SelectedIndex + 1)
     $cfg.friends = [string]($netFriends.SelectedIndex + 1)
     $cfg.join = $netJoin.Text.Trim()
 }
@@ -849,6 +854,7 @@ function Start-Game([hashtable]$online) {
     if ($cfg.scale -ne 'Auto') { $env:WPR_SCALE = $cfg.scale } else { Remove-Item Env:WPR_SCALE -ErrorAction SilentlyContinue }
     $env:WPR_FULLSCREEN = $cfg.fullscreen
     $env:WPR_SIDEWAYS = $cfg.sideways
+    $env:WPR_LOCAL_PLAYERS = $cfg.players
     foreach ($a in $actions) { Set-Item ('Env:WPR_KEY_' + $a[0]) $cfg['key_' + $a[0]] }
     foreach ($k2 in 'WPR_NET_HOST', 'WPR_NET_JOIN', 'WPR_NET_ROOM', 'WPR_NET_PLAYERS', 'WPR_NET_NAME', 'WPR_NET_LOCAL') { Remove-Item "Env:$k2" -ErrorAction SilentlyContinue }
     if ($online) { foreach ($k2 in $online.Keys) { Set-Item "Env:$k2" $online[$k2] } }
@@ -873,6 +879,9 @@ function Start-Game([hashtable]$online) {
 
 $play.Add_Click({ Start-Game $null })
 
+# the game's player slots used on this PC online: "0" for one player, "0,1" for two, ...
+function Get-LocalDevices { return ((0..([int]$cfg.players - 1)) -join ',') }
+
 # A room code: 6 letters and digits that are hard to mix up, with at least one of each
 function New-RoomCode {
     $letters = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; $digits = '23456789'; $all = $letters + $digits
@@ -892,13 +901,13 @@ $hostBtn.Add_Click({
     $copyBtn.Text = 'Copy'; $copyBtn.Visible = $true
     [System.Windows.Forms.Clipboard]::SetText($script:shareAddress)
     Show-Message ("Send your friends this room code (it is already copied, paste it in a chat):`r`n`r`n$($script:shareAddress)`r`n`r`nThe game opens now and waits until they have joined. The code is also in the game window's title.")
-    Start-Game @{ WPR_NET_HOST = [string]$port; WPR_NET_ROOM = $script:shareAddress; WPR_NET_PLAYERS = $cfg.friends; WPR_NET_NAME = $cfg.name; WPR_NET_LOCAL = $cfg.local }
+    Start-Game @{ WPR_NET_HOST = [string]$port; WPR_NET_ROOM = $script:shareAddress; WPR_NET_PLAYERS = $cfg.friends; WPR_NET_NAME = $cfg.name; WPR_NET_LOCAL = (Get-LocalDevices) }
 })
 
 $joinBtn.Add_Click({
     Read-Settings
     if (-not $cfg.join) { Show-Message "Type the room code the host sent you first." 'Warning'; return }
-    Start-Game @{ WPR_NET_JOIN = $cfg.join; WPR_NET_NAME = $cfg.name; WPR_NET_LOCAL = $cfg.local }
+    Start-Game @{ WPR_NET_JOIN = $cfg.join; WPR_NET_NAME = $cfg.name; WPR_NET_LOCAL = (Get-LocalDevices) }
 })
 
 $form.Add_FormClosing({ Read-Settings; Save-Settings })

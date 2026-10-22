@@ -4,7 +4,8 @@
  *   A / Cross  -> A          B / Circle -> B        X -> 1        Y -> 2
  *   Start      -> +          Back       -> -        Guide -> Home
  *   D-pad      -> D-pad      Right stick -> pointer  Left stick -> tilt
- * One player per device: the keyboard and mouse are player 1, each gamepad is the next player (2-4).
+ * One player per PC by default: the keyboard, the mouse and one gamepad all play player 1. With
+ * WPR_LOCAL_PLAYERS=n, gamepads are players 2..n. A gamepad joins when one of its buttons is pressed.
  */
 #include <SDL3/SDL.h>
 #include <math.h>
@@ -29,6 +30,11 @@ static SDL_Renderer* renderer;
 static SDL_Texture* xfb_tex;
 static int xfb_w, xfb_h;
 static SDL_Gamepad* pads[MAX_PLAYERS];
+/* Gamepads Windows reports but that haven't pressed a button yet. Like syncing a real Remote, a pad
+ * becomes a player only when a button is pressed on it, so a virtual or unused pad isn't a player. */
+#define MAX_WAITING 8
+static SDL_Gamepad* waiting_pads[MAX_WAITING];
+static int pad_hold[MAX_PLAYERS];  /* the button that joined is still down: don't pass it on */
 static HostRemote remotes[MAX_PLAYERS];
 static int sideways;
 static SDL_GLContext gl_context;  /* with OpenGL the GX renderer draws into the window itself */
@@ -105,28 +111,71 @@ int platform_init(const char* title, int width, int height) {
     return 1;
 }
 
+static const char* pad_name(SDL_Gamepad* g) {
+    const char* n = SDL_GetGamepadName(g);
+    return n ? n : "gamepad";
+}
+
 static void assign_pads(void) {
     int count = 0;
     SDL_JoystickID* ids = SDL_GetGamepads(&count);
-    for (int p = 0; p < MAX_PLAYERS; p++) {
-        if (pads[p] && !SDL_GamepadConnected(pads[p])) { SDL_CloseGamepad(pads[p]); pads[p] = NULL; }
-    }
+    for (int p = 0; p < MAX_PLAYERS; p++)
+        if (pads[p] && !SDL_GamepadConnected(pads[p])) {
+            fprintf(stderr, "[input] player %d's gamepad is gone\n", p + 1);
+            SDL_CloseGamepad(pads[p]);
+            pads[p] = NULL;
+        }
+    for (int i = 0; i < MAX_WAITING; i++)
+        if (waiting_pads[i] && !SDL_GamepadConnected(waiting_pads[i])) { SDL_CloseGamepad(waiting_pads[i]); waiting_pads[i] = NULL; }
     for (int i = 0; ids && i < count; i++) {
         int taken = 0;
         for (int p = 0; p < MAX_PLAYERS; p++)
             if (pads[p] && SDL_GetGamepadID(pads[p]) == ids[i]) taken = 1;
+        for (int w = 0; w < MAX_WAITING; w++)
+            if (waiting_pads[w] && SDL_GetGamepadID(waiting_pads[w]) == ids[i]) taken = 1;
         if (taken) continue;
-        /* the keyboard and mouse are player 1, so gamepads fill players 2-4 first */
-        static const int order[MAX_PLAYERS] = {1, 2, 3, 0};
-        for (int j = 0; j < MAX_PLAYERS; j++)
-            if (!pads[order[j]]) {
-                pads[order[j]] = SDL_OpenGamepad(ids[i]);
-                const char* name = SDL_GetGamepadNameForID(ids[i]);
-                fprintf(stderr, "[input] player %d: %s\n", order[j] + 1, name ? name : "gamepad");
+        for (int w = 0; w < MAX_WAITING; w++)
+            if (!waiting_pads[w]) {
+                waiting_pads[w] = SDL_OpenGamepad(ids[i]);
+                if (waiting_pads[w])
+                    fprintf(stderr, "[input] found %s: press a button on it to play\n", pad_name(waiting_pads[w]));
                 break;
             }
     }
     SDL_free(ids);
+}
+
+static int any_button(SDL_Gamepad* g) {
+    for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; b++)
+        if (SDL_GetGamepadButton(g, (SDL_GamepadButton)b)) return 1;
+    return 0;
+}
+
+/* A waiting pad whose button is pressed becomes the next player. The keyboard is player 1, gamepads
+ * are players 2..WPR_LOCAL_PLAYERS (default 1: one player per PC), and one more gamepad can play
+ * player 1 together with the keyboard. Other pads are ignored. */
+static void join_pads(void) {
+    static int order[MAX_PLAYERS], norder = -1;
+    if (norder < 0) {
+        const char* e = getenv("WPR_LOCAL_PLAYERS");
+        int n = e && *e ? atoi(e) : 1;
+        if (n < 1) n = 1;
+        if (n > MAX_PLAYERS) n = MAX_PLAYERS;
+        norder = 0;
+        for (int p = 1; p < n; p++) order[norder++] = p;
+        order[norder++] = 0;
+    }
+    for (int w = 0; w < MAX_WAITING; w++) {
+        if (!waiting_pads[w] || !any_button(waiting_pads[w])) continue;
+        for (int j = 0; j < norder; j++)
+            if (!pads[order[j]]) {
+                pads[order[j]] = waiting_pads[w];
+                pad_hold[order[j]] = 1;
+                waiting_pads[w] = NULL;
+                fprintf(stderr, "[input] player %d: %s\n", order[j] + 1, pad_name(pads[order[j]]));
+                break;
+            }
+    }
 }
 
 static float axis(SDL_Gamepad* g, SDL_GamepadAxis a) {
@@ -134,8 +183,8 @@ static float axis(SDL_Gamepad* g, SDL_GamepadAxis a) {
     return (v > -0.15f && v < 0.15f) ? 0.0f : v;
 }
 
-/* One player per device: the keyboard and mouse are player 1 (mouse pointer, left click A, right
- * click B; the arrow keys also move the pointer and press the D-pad), each gamepad is one more player.
+/* The keyboard and mouse are player 1 (mouse pointer, left click A, right
+ * click B; the arrow keys also move the pointer and press the D-pad); see the top of this file for gamepads.
  * F1 turns the direction keys for a Remote held sideways (as most minigames ask). */
 typedef struct {
     SDL_Scancode up, down, left, right, a, b, one, two, plus, minus, home, shake, a2, b2, ab;
@@ -190,6 +239,7 @@ static void poll_input(void) {
     float dt = last_poll_ns ? (float)(now - last_poll_ns) / 1e9f : 0.0f;
     if (dt > 0.1f) dt = 0.1f;
     last_poll_ns = now;
+    join_pads();
     for (int p = 0; p < MAX_PLAYERS; p++) {
         HostRemote* r = &remotes[p];
         SDL_Gamepad* g = pads[p];
@@ -197,6 +247,9 @@ static void poll_input(void) {
         uint16_t b = 0;
         int shake = 0;
         r->connected = p == 0 || g;
+        if (g && pad_hold[p]) {
+            if (any_button(g)) g = NULL; else pad_hold[p] = 0;
+        }
         float turn = 0.0f, lean = 0.0f;  /* wanted tilt, -1..1: turn left/right, lean forward/back */
         if (g) {
             static const struct { SDL_GamepadButton sdl; uint16_t wii; } map[] = {
