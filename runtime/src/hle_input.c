@@ -17,6 +17,7 @@
 #include "runtime.h"
 
 #define KPAD_STATUS_SIZE 0xF0
+#define KPAD_SAMPLES 3
 #define WPAD_DEV_CORE 0
 #define WPAD_DEV_NONE 0xFD
 #define WPAD_ERR_NONE 0
@@ -146,42 +147,54 @@ void hle_KPADReadEx(PPCContext* c) {
     float px = r->ir_x, py = r->ir_y;
     if (!net_active()) scripted_pointer(chan, reads[0], &px, &py);
     if (!net_active() && chan == 0) live_control(reads[0], &hold, &px, &py);
-    float vx = px - prev[chan].pos[0], vy = py - prev[chan].pos[1];
+    float cur[5] = {r->accel[0], r->accel[1], r->accel[2], px, py};
+    float old_v[5] = {prev[chan].acc[0], prev[chan].acc[1], prev[chan].acc[2], prev[chan].pos[0], prev[chan].pos[1]};
 
-    for (uint32_t i = 0; i < KPAD_STATUS_SIZE; i += 4) mem_w32(buf + i, 0);
-    mem_w32(buf + 0x00, hold);
-    mem_w32(buf + 0x04, hold & ~old);
-    mem_w32(buf + 0x08, old & ~hold);
-    /* held level and still: gravity along -y; the left stick tilts */
-    float ax = r->accel[0], ay = r->accel[1], az = r->accel[2];
-    float dx = ax - prev[chan].acc[0], dy = ay - prev[chan].acc[1], dz = az - prev[chan].acc[2];
-    mem_wf32(buf + 0x0C, ax);
-    mem_wf32(buf + 0x10, ay);
-    mem_wf32(buf + 0x14, az);
-    mem_wf32(buf + 0x18, sqrtf(ax * ax + ay * ay + az * az));   /* acc_value */
-    mem_wf32(buf + 0x1C, sqrtf(dx * dx + dy * dy + dz * dz));   /* acc_speed: what shake checks read */
-    prev[chan].acc[0] = ax; prev[chan].acc[1] = ay; prev[chan].acc[2] = az;
-    mem_wf32(buf + 0x20, px);
-    mem_wf32(buf + 0x24, py);
-    mem_wf32(buf + 0x28, vx);
-    mem_wf32(buf + 0x2C, vy);
-    mem_wf32(buf + 0x30, sqrtf(vx * vx + vy * vy));
-    float lv = sqrtf(ay * ay + az * az), lh = sqrtf(ay * ay + ax * ax);
-    mem_wf32(buf + 0x34, lh > 0 ? -ay / lh : 1.0f);   /* horizon: the roll around the Remote */
-    mem_wf32(buf + 0x38, lh > 0 ? ax / lh : 0.0f);
-    mem_wf32(buf + 0x48, 1.5f);   /* distance to the sensor bar, metres */
-    mem_wf32(buf + 0x54, lv > 0 ? -ay / lv : 1.0f);   /* acc_vertical: the tilt along the Remote */
-    mem_wf32(buf + 0x58, lv > 0 ? az / lv : 0.0f);
-    mem_w8(buf + 0x5C, WPAD_DEV_CORE);
-    mem_w8(buf + 0x5D, WPAD_ERR_NONE);
-    mem_w8(buf + 0x5E, 2);        /* both sensor bar dots visible */
-    mem_w8(buf + 0x5F, 0);
-
+    /* A real Remote reports about 200 times a second, so a read finds three or four samples; the
+     * game's swing check needs several samples per swing. The older ones lie between the last
+     * read and this one (newest first); a press shows only in the newest. */
+    uint32_t n = len < KPAD_SAMPLES ? len : KPAD_SAMPLES;
+    for (uint32_t s = 0; s < n; s++) {
+        uint32_t at = buf + s * KPAD_STATUS_SIZE;
+        float v[5], o[5];
+        for (int i = 0; i < 5; i++) {
+            float w = (float)s / n, wo = (float)(s + 1) / n;
+            v[i] = cur[i] * (1 - w) + old_v[i] * w;
+            o[i] = cur[i] * (1 - wo) + old_v[i] * wo;
+        }
+        float ax = v[0], ay = v[1], az = v[2], dx = ax - o[0], dy = ay - o[1], dz = az - o[2];
+        float vx = v[3] - o[3], vy = v[4] - o[4];
+        for (uint32_t i = 0; i < KPAD_STATUS_SIZE; i += 4) mem_w32(at + i, 0);
+        mem_w32(at + 0x00, s == 0 ? hold : old);
+        mem_w32(at + 0x04, s == 0 ? hold & ~old : 0);
+        mem_w32(at + 0x08, s == 0 ? old & ~hold : 0);
+        mem_wf32(at + 0x0C, ax);
+        mem_wf32(at + 0x10, ay);
+        mem_wf32(at + 0x14, az);
+        mem_wf32(at + 0x18, sqrtf(ax * ax + ay * ay + az * az));   /* acc_value */
+        mem_wf32(at + 0x1C, sqrtf(dx * dx + dy * dy + dz * dz));   /* acc_speed */
+        mem_wf32(at + 0x20, v[3]);
+        mem_wf32(at + 0x24, v[4]);
+        mem_wf32(at + 0x28, vx);
+        mem_wf32(at + 0x2C, vy);
+        mem_wf32(at + 0x30, sqrtf(vx * vx + vy * vy));
+        float lv = sqrtf(ay * ay + az * az), lh = sqrtf(ay * ay + ax * ax);
+        mem_wf32(at + 0x34, lh > 0 ? -ay / lh : 1.0f);   /* horizon: the roll around the Remote */
+        mem_wf32(at + 0x38, lh > 0 ? ax / lh : 0.0f);
+        mem_wf32(at + 0x48, 1.5f);   /* distance to the sensor bar, metres */
+        mem_wf32(at + 0x54, lv > 0 ? -ay / lv : 1.0f);   /* acc_vertical: the tilt along the Remote */
+        mem_wf32(at + 0x58, lv > 0 ? az / lv : 0.0f);
+        mem_w8(at + 0x5C, WPAD_DEV_CORE);
+        mem_w8(at + 0x5D, WPAD_ERR_NONE);
+        mem_w8(at + 0x5E, 2);        /* both sensor bar dots visible */
+        mem_w8(at + 0x5F, 0);
+    }
+    prev[chan].acc[0] = cur[0]; prev[chan].acc[1] = cur[1]; prev[chan].acc[2] = cur[2];
     prev[chan].hold = hold;
     prev[chan].pos[0] = px;
     prev[chan].pos[1] = py;
     if (err) mem_w32(err, WPAD_ERR_NONE);
-    c->r[3] = 1;
+    c->r[3] = n;
 }
 
 void hle_WUDInit(PPCContext* c) {

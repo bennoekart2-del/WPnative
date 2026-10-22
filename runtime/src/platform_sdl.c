@@ -206,6 +206,7 @@ static uint64_t wheel_up_until, wheel_down_until;
 #define MAX_G 3.4f  /* the most the Remote's accelerometer reports, in g */
 static uint64_t swing_start[MAX_PLAYERS];
 static float swing_dir[MAX_PLAYERS];  /* a mouse-wheel notch swings the Remote for a moment */
+static uint64_t shake_start[MAX_PLAYERS];
 static const KeySet no_keys = {SDL_SCANCODE_UNKNOWN};
 static float key_ptr[MAX_PLAYERS][2];
 static float tilt[MAX_PLAYERS][2];  /* current turn and lean angles, radians */
@@ -311,39 +312,62 @@ static void poll_input(void) {
         if (down(keys, k->tilt_right)) turn = 1.0f;
         if (down(keys, k->tilt_fwd)) lean = 1.0f;     /* R / F */
         if (down(keys, k->tilt_back)) lean = -1.0f;
-        /* The Remote turns smoothly towards the wanted angle (up to 60 degrees) and back to level
-         * when let go, like a hand would. acc is the gravity reaction in KPAD axes: x across
-         * the face, y out of the buttons (-1 when level), z along the Remote. Held upright, turning
-         * left/right rolls it around its length (x); held sideways, its length lies left-right, so
-         * turning like a steering wheel moves gravity onto z and leaning moves it onto x. */
+        /* The Remote turns smoothly towards the wanted angle and back to level when let go, like
+         * a hand would: up to 90 degrees when pointing at the screen (some games want it pointing
+         * at the floor, or twisted a quarter turn), 60 held sideways. acc is the gravity reaction in
+         * KPAD axes: x across the face, y out of the buttons (-1 when level), z along the Remote
+         * (+1 pointing at the floor: the game's swing check waits for z > 1.7, the pull of a swing
+         * on the Remote's tip). Held upright, leaning tips the Remote down onto z and turning rolls
+         * it around its length onto x; held sideways, its length lies left-right, so turning like a
+         * steering wheel moves gravity onto z and leaning moves it onto x. */
         float* ang = tilt[p];
-        float step = 4.0f * dt;
-        float want[2] = {turn * 1.05f, lean * 1.05f};
+        float step = 4.0f * dt, max = sideways ? 1.05f : 1.5708f;
+        float want[2] = {turn * max, lean * max};
         for (int i = 0; i < 2; i++) {
             float d = want[i] - ang[i];
             ang[i] += d > step ? step : d < -step ? -step : d;
         }
         float a_turn = ang[0], a_lean = ang[1];
-        float across = sinf(sideways ? a_lean : a_turn), along = sinf(sideways ? -a_turn : -a_lean);
-        r->accel[0] = across;
-        r->accel[2] = along;
-        r->accel[1] = -sqrtf(fmaxf(0.0f, 1.0f - across * across - along * along));
-        /* A swing is a hard push (as hard as the Remote measures) and then the stop, like an arm;
-         * a held key or more wheel notches swing again every 0.3 s. */
+        if (sideways) {
+            r->accel[0] = sinf(a_lean) * cosf(a_turn);
+            r->accel[2] = -sinf(a_turn);
+            r->accel[1] = -cosf(a_lean) * cosf(a_turn);
+        } else {
+            r->accel[0] = sinf(a_turn) * cosf(a_lean);
+            r->accel[2] = sinf(a_lean);
+            r->accel[1] = -cosf(a_turn) * cosf(a_lean);
+        }
+        /* A swing is a flick of the wrist: the Remote (15 cm out) turns 70 degrees up or down in
+         * 0.15 s and comes back in 0.33 s. What it reads is the push of turning (y), the pull outwards
+         * (z, which the game's swing check waits for) and gravity as the Remote turns. A held key or
+         * more wheel notches swing again every 0.5 s. */
         int su = down(keys, k->swing_up) || (p == 0 && now < wheel_up_until);
         int sd = down(keys, k->swing_down) || (p == 0 && now < wheel_down_until);
-        if ((su || sd) && now - swing_start[p] > 300000000ull) {
+        if ((su || sd) && now - swing_start[p] > 500000000ull) {
             swing_start[p] = now;
             swing_dir[p] = su ? 1.0f : -1.0f;
         }
         float st = (float)(now - swing_start[p]) / 1e9f;
-        if (swing_start[p] && st < 0.22f) r->accel[1] += swing_dir[p] * (st < 0.12f ? MAX_G : -2.5f);
-        if (shake) {
-            /* as hard as possible in every direction: full scale on all three axes, flipping every frame */
-            static const float dirs[4][3] = {{1, -1, 1}, {-1, 1, -1}, {1, 1, -1}, {-1, -1, 1}};
-            const float* d = dirs[(now / 16666667ull) & 3];
-            for (int i = 0; i < 3; i++) r->accel[i] = d[i] * MAX_G;
+        if (swing_start[p] && st < 0.48f) {
+            const float out = 0.15f / 9.81f, go = 0.15f, back = 0.33f, full = 1.2f * swing_dir[p];
+            float u = st < go ? st / go : (st - go) / back, T = st < go ? go : back, sg = st < go ? 1.0f : -1.0f;
+            if (u > 1) u = 1;
+            float pos = u * u * u * (10 - 15 * u + 6 * u * u);   /* smooth start and stop */
+            float th = full * (st < go ? pos : 1 - pos);
+            float w = sg * full / T * 30 * u * u * (1 - u) * (1 - u);
+            float al = sg * full / (T * T) * 60 * u * (1 - u) * (1 - 2 * u);
+            r->accel[1] += -out * al - cosf(th) + 1.0f;
+            r->accel[2] += out * w * w - sinf(th);
         }
+        if (shake) {
+            /* a hard shake, about 7 times a second, on every axis (the game counts the swings in it) */
+            if (!shake_start[p]) shake_start[p] = now;
+            float v = 3.2f * sinf(2 * 3.14159f * 7.0f * (float)(now - shake_start[p]) / 1e9f);
+            for (int i = 0; i < 3; i++) r->accel[i] += v;
+        } else {
+            shake_start[p] = 0;
+        }
+        for (int i = 0; i < 3; i++) r->accel[i] = fmaxf(-MAX_G, fminf(MAX_G, r->accel[i]));
 
         /* pointer: mouse (player 1, once it moves), right stick, or the direction keys */
         float* kp = key_ptr[p];
