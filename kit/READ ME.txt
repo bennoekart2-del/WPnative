@@ -12,11 +12,11 @@ is not included: you need your own disc, copied to your PC once with Dolphin.
 2. Unzip this kit to a folder WITHOUT spaces in its name, for example C:\WiiPartyKit
 
 3. Double-click "Build Wii Party.bat" and choose your disc folder when asked.
-   It downloads the tools it needs, then builds the game. This takes 20-60 minutes
+   It downloads the tools it needs, then builds the game. This takes 10-40 minutes
    and about 6 GB of disc space. Leave the black window open until it says Done.
 
 4. Open the new "Wii Party" folder and double-click "Wii Party.bat".
-   To play online: Online tab > type the address your friend sent you > JOIN.
+   To play online: Online tab > type the room code your friend sent you > JOIN.
 
 If Windows says "Windows protected your PC": press "More info", then "Run anyway".
 If something goes wrong, send a screenshot of the black window to whoever helps you.

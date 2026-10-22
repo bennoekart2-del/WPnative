@@ -300,17 +300,13 @@ $netFriends.DropDownStyle = 'DropDownList'; $netFriends.Location = New-Object Sy
 foreach ($n in 1..3) { [void]$netFriends.Items.Add([string]$n) }
 $netFriends.SelectedIndex = [Math]::Max(0, [Math]::Min(2, [int]$cfg.friends - 1))
 $tOnline.Controls.Add($netFriends)
-Add-Label $tOnline 'Port' 250 182 40 | Out-Null
-$netPort = New-Object System.Windows.Forms.TextBox
-$netPort.Location = New-Object System.Drawing.Point(292, 178); $netPort.Size = New-Object System.Drawing.Size(70, 26); $netPort.Text = $cfg.port
-$tOnline.Controls.Add($netPort)
 $hostBtn = Add-Button $tOnline 'HOST' 380 174 140 34
-$hostInfo = Add-Label $tOnline '' 16 214 400 40
+$hostInfo = Add-Label $tOnline '' 16 214 400 40 $bold
 $copyBtn = Add-Button $tOnline 'Copy' 430 216 90 30
 $copyBtn.Visible = $false
 
 Add-Label $tOnline "Join a friend's game" 16 262 300 24 $bold | Out-Null
-Add-Label $tOnline "Host's address" 16 292 140 | Out-Null
+Add-Label $tOnline "Room code" 16 292 140 | Out-Null
 $netJoin = New-Object System.Windows.Forms.TextBox
 $netJoin.Location = New-Object System.Drawing.Point(160, 288); $netJoin.Size = New-Object System.Drawing.Size(202, 26); $netJoin.Text = $cfg.join
 $tOnline.Controls.Add($netJoin)
@@ -321,13 +317,14 @@ $netHelp.Multiline = $true; $netHelp.ReadOnly = $true; $netHelp.ScrollBars = 'Ve
 $netHelp.Location = New-Object System.Drawing.Point(16, 330); $netHelp.Size = New-Object System.Drawing.Size(504, 140)
 $netHelp.Text = ("HOW IT WORKS`r`n" +
     "1. The host picks how many friends join and presses HOST. The game window opens and waits for them.`r`n" +
-    "2. The host sends the address shown here to the friends (press Copy).`r`n" +
-    "3. Each friend types that address and presses JOIN. When everyone is in, the game starts on all PCs.`r`n" +
+    "2. The host sends the room code shown here to the friends (it is already copied: paste it in a chat).`r`n" +
+    "3. Each friend types the room code and presses JOIN. When everyone is in, the game starts on all PCs.`r`n" +
     "The host's Miis and saves are used by everyone. Saves only change on the host's PC.`r`n`r`n" +
     "CAN'T CONNECT?`r`n" +
     "- If Windows asks about the firewall when you host, press Allow.`r`n" +
-    "- The host's router has to let friends in. The launcher asks the router to open the port by itself (UPnP). If that doesn't work, open TCP port 47123 to the host's PC in the router settings (search for 'port forwarding' with your router's name).`r`n" +
-    "- Or: everyone installs a free 'virtual LAN' program such as Radmin VPN or ZeroTier, joins the same network, and friends type the host's address from that program.`r`n" +
+    "- Try once more: the games find each other through your routers by themselves, and that sometimes needs a second try.`r`n" +
+    "- Some routers (and most phone hotspots) don't allow that. Then the host opens UDP port 47123 to their PC in the router settings (search for 'port forwarding' with your router's name), and friends type the host's internet address (search 'what is my IP' on the host's PC) instead of the room code.`r`n" +
+    "- Or: everyone installs a free 'virtual LAN' program such as Radmin VPN or ZeroTier, joins the same network, and friends type the host's address from that program instead of the room code.`r`n" +
     "- 'Different version': everyone needs the same game version and a Wii Party disc from the same region.`r`n`r`n" +
     "FRIEND WITHOUT THE GAME?`r`n" +
     "They can still play on the host's PC through Parsec (free): it turns their gamepad into a controller on the host's PC. Press 'Get Parsec' below.")
@@ -343,8 +340,8 @@ function Open-RouterPort([int]$port) {
         if (-not $ip) { return $false }
         $maps = (New-Object -ComObject HNetCfg.NATUPnP).StaticPortMappingCollection
         if (-not $maps) { return $false }
-        try { $maps.Remove($port, 'TCP') } catch { }
-        [void]$maps.Add($port, 'TCP', $port, $ip, $true, 'Wii Party online')
+        try { $maps.Remove($port, 'UDP') } catch { }
+        [void]$maps.Add($port, 'UDP', $port, $ip, $true, 'Wii Party online')
         return $true
     } catch { return $false }
 }
@@ -368,7 +365,7 @@ $help.Text = ("HOW TO START`r`n" +
     "- A gamepad does nothing: plug it in before pressing PLAY.`r`n" +
     "- The game closed by itself: send the file log.txt from this folder to the person who helps you.`r`n" +
     "- Windows said 'Windows protected your PC': press 'More info' and then 'Run anyway'.`r`n`r`n" +
-    "PLAYING ONLINE`r`nSee the Online tab: one person presses HOST, the others type the address and press JOIN.")
+    "PLAYING ONLINE`r`nSee the Online tab: one person presses HOST, the others type the room code and press JOIN.")
 $help.Select(0, 0)
 $tHelp.Controls.Add($help)
 
@@ -381,7 +378,6 @@ function Read-Settings {
     $cfg.name = $netName.Text.Trim()
     $cfg.local = $localChoices[[Math]::Max(0, $netLocal.SelectedIndex)][0]
     $cfg.friends = [string]($netFriends.SelectedIndex + 1)
-    $cfg.port = if ($netPort.Text.Trim() -match '^\d+$') { $netPort.Text.Trim() } else { '47123' }
     $cfg.join = $netJoin.Text.Trim()
 }
 
@@ -418,7 +414,7 @@ function Start-Game([hashtable]$online) {
     $env:WPR_FULLSCREEN = $cfg.fullscreen
     $env:WPR_SIDEWAYS = $cfg.sideways
     foreach ($a in $actions) { Set-Item ('Env:WPR_KEY_' + $a[0]) $cfg['key_' + $a[0]] }
-    foreach ($k in 'WPR_NET_HOST', 'WPR_NET_JOIN', 'WPR_NET_PLAYERS', 'WPR_NET_NAME', 'WPR_NET_LOCAL') { Remove-Item "Env:$k" -ErrorAction SilentlyContinue }
+    foreach ($k in 'WPR_NET_HOST', 'WPR_NET_JOIN', 'WPR_NET_ROOM', 'WPR_NET_PLAYERS', 'WPR_NET_NAME', 'WPR_NET_LOCAL') { Remove-Item "Env:$k" -ErrorAction SilentlyContinue }
     if ($online) { foreach ($k in $online.Keys) { Set-Item "Env:$k" $online[$k] } }
     $started = Get-Date
     $proc = Start-Process -FilePath $exe -ArgumentList ('"' + $cfg.disc + '"') -WorkingDirectory $dir `
@@ -441,29 +437,31 @@ function Start-Game([hashtable]$online) {
 
 $play.Add_Click({ Start-Game $null })
 
+# A room code: 6 letters and digits that are hard to mix up, with at least one of each
+function New-RoomCode {
+    $letters = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; $digits = '23456789'; $all = $letters + $digits
+    do { $code = -join (1..6 | ForEach-Object { $all[(Get-Random -Maximum $all.Length)] }) }
+    until ($code -match '[A-Z]' -and $code -match '[0-9]')
+    return $code
+}
+
 $hostBtn.Add_Click({
     Read-Settings
-    $port = [int]$cfg.port
-    $hostInfo.Text = 'Getting your address...'; $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor; $form.Refresh()
-    $opened = Open-RouterPort $port
-    $public = $null
-    try { $public = (Invoke-RestMethod -Uri 'https://api.ipify.org' -TimeoutSec 5).ToString().Trim() } catch { }
+    $port = if ($cfg.port -match '^\d+$') { [int]$cfg.port } else { 47123 }
+    $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor; $form.Refresh()
+    [void](Open-RouterPort $port)  # helps with strict routers; the room code works without it too
     $form.Cursor = [System.Windows.Forms.Cursors]::Default
-    if ($public) {
-        $script:shareAddress = if ($port -eq 47123) { $public } else { "${public}:$port" }
-        $hostInfo.Text = "Friends type: $($script:shareAddress)" + $(if ($opened) { '' } else { "`r`n(the router didn't open the port by itself: see below)" })
-        $copyBtn.Visible = $true
-        [System.Windows.Forms.Clipboard]::SetText($script:shareAddress)
-        Show-Message ("Send your friends this address (it is already copied, paste it in a chat):`r`n`r`n$($script:shareAddress)`r`n`r`nThe game opens now and waits until they have joined.")
-    } else {
-        $hostInfo.Text = "Couldn't find your internet address. Friends on the same network or VPN can use this PC's address."
-    }
-    Start-Game @{ WPR_NET_HOST = [string]$port; WPR_NET_PLAYERS = $cfg.friends; WPR_NET_NAME = $cfg.name; WPR_NET_LOCAL = $cfg.local }
+    $script:shareAddress = New-RoomCode
+    $hostInfo.Text = "Room code: $($script:shareAddress)"
+    $copyBtn.Visible = $true
+    [System.Windows.Forms.Clipboard]::SetText($script:shareAddress)
+    Show-Message ("Send your friends this room code (it is already copied, paste it in a chat):`r`n`r`n$($script:shareAddress)`r`n`r`nThe game opens now and waits until they have joined. The code is also in the game window's title.")
+    Start-Game @{ WPR_NET_HOST = [string]$port; WPR_NET_ROOM = $script:shareAddress; WPR_NET_PLAYERS = $cfg.friends; WPR_NET_NAME = $cfg.name; WPR_NET_LOCAL = $cfg.local }
 })
 
 $joinBtn.Add_Click({
     Read-Settings
-    if (-not $cfg.join) { Show-Message "Type the address the host sent you first." 'Warning'; return }
+    if (-not $cfg.join) { Show-Message "Type the room code the host sent you first." 'Warning'; return }
     Start-Game @{ WPR_NET_JOIN = $cfg.join; WPR_NET_NAME = $cfg.name; WPR_NET_LOCAL = $cfg.local }
 })
 

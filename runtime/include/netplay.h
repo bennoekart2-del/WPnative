@@ -1,10 +1,10 @@
-/* Netplay: lockstep inputs over TCP (netplay.c). */
+/* Netplay: lockstep inputs over ENet/UDP, joined by room code or address (netplay.c). */
 #pragma once
 #include <stdint.h>
 #include "runtime.h"
 
 int net_active(void);
-/* Before boot: WPR_NET_HOST=<port> waits for WPR_NET_PLAYERS friends, WPR_NET_JOIN=<host[:port]>
+/* Before boot: WPR_NET_HOST=<port> waits for WPR_NET_PLAYERS friends, WPR_NET_JOIN=<room code or host[:port]>
  * connects and receives the host's save data and settings. Returns 0 if netplay was asked for and
  * failed (the reason is shown and logged), 1 otherwise. */
 int net_start(const char* disc_root);

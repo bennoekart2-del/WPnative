@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import re
 import struct
@@ -154,9 +155,20 @@ class RelEmitter(Emitter):
         return f"{fn(target)}(c);"
 
 
+@contextlib.contextmanager
+def atomic_write(path):
+    """Two discs' worth of modules can share an id (ms601/ms602), and the kit translates several
+    modules at once: write whole files only."""
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w") as f:
+        yield f
+    os.replace(tmp, path)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rel", nargs="+", required=True)
+    ap.add_argument("--rel", nargs="*", default=[], help="modules to translate (none: only rewrite rel_registry.c, "
+                    "e.g. after several runs in parallel)")
     ap.add_argument("--dol-gen", required=True, help="directory with the DOL's recomp_funcs.h")
     ap.add_argument("--out", required=True)
     ap.add_argument("--chunk", type=int, default=2000)
@@ -193,16 +205,16 @@ def main() -> int:
                   f"#define RB(v) (g_rel_base[{mid}] + ((v) - {h(vb)}))\n\n")
         ctr = f"c->ctr - g_rel_base[{mid}] + {h(vb)}"
         for n in range(0, len(items), args.chunk):
-            with open(os.path.join(args.out, f"rel_{mid}_{n // args.chunk:03d}.c"), "w") as f:
+            with atomic_write(os.path.join(args.out, f"rel_{mid}_{n // args.chunk:03d}.c")) as f:
                 f.write(header)
                 for s, e in items[n:n + args.chunk]:
                     f.write(emit_function(em, img, s, e, ctr_expr=ctr))
                     f.write("\n\n")
-        with open(os.path.join(args.out, f"rel_{mid}.h"), "w") as f:
+        with atomic_write(os.path.join(args.out, f"rel_{mid}.h")) as f:
             f.write("#pragma once\n#include \"ppc_context.h\"\n")
             for s in sorted(funcs):
                 f.write(f"void {fn(s)}(PPCContext* c);\n")
-        with open(os.path.join(args.out, f"rel_{mid}_table.c"), "w") as f:
+        with atomic_write(os.path.join(args.out, f"rel_{mid}_table.c")) as f:
             f.write(f'#include "rel_{mid}.h"\n#include "rel_module.h"\n\n')
             f.write(f"static const PPCFuncEntry funcs[] = {{\n")
             for s in sorted(funcs):
@@ -216,7 +228,7 @@ def main() -> int:
 
     # registry of every module generated into this directory (kept across runs)
     have = sorted({int(m) for m in re.findall(r"rel_(\d+)_table\.c", " ".join(os.listdir(args.out)))})
-    with open(os.path.join(args.out, "rel_registry.c"), "w") as f:
+    with atomic_write(os.path.join(args.out, "rel_registry.c")) as f:
         f.write('#include "rel_module.h"\n\n')
         for m in have:
             f.write(f"extern const RelModule g_rel_module_{m};\n")

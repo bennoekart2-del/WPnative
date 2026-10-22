@@ -15,6 +15,17 @@ FetchContent_Declare(SDL3  # a release archive, so building needs no git
     URL_HASH SHA256=81cc0fc17e5bf2c1754eeca9af9c47a76789ac5efdd165b3b91cbbe4b90bfb76)
 FetchContent_MakeAvailable(SDL3)
 
+# ENet (MIT, third_party/enet): reliable messages over UDP, so two home routers can be punched through
+file(GLOB ENET_SRC third_party/enet/*.c)
+add_library(enet STATIC ${ENET_SRC})
+target_include_directories(enet PUBLIC third_party/enet/include)
+if(WIN32)
+    target_link_libraries(enet PUBLIC ws2_32 winmm)
+else()
+    target_compile_definitions(enet PRIVATE HAS_FCNTL=1 HAS_POLL=1 HAS_GETADDRINFO=1 HAS_GETNAMEINFO=1
+        HAS_INET_PTON=1 HAS_INET_NTOP=1 HAS_MSGHDR_FLAGS=1 HAS_SOCKLEN_T=1)
+endif()
+
 set(RUNTIME_SRC
     runtime/src/main.c runtime/src/boot.c runtime/src/cpu_services.c runtime/src/hw.c runtime/src/dsp.c
     runtime/src/gx_fifo.c runtime/src/gx_render.c runtime/src/gx_gl.c runtime/src/platform_sdl.c runtime/src/platform_audio.c runtime/src/threads.c
@@ -24,13 +35,20 @@ set(RUNTIME_SRC
 if(WPR_GEN_DIR)
     file(GLOB GEN_SRC ${WPR_GEN_DIR}/*.c)
     set_source_files_properties(${GEN_SRC} PROPERTIES COMPILE_OPTIONS "$<$<C_COMPILER_ID:MSVC>:/bigobj>")
+    # The minigames (rel_*.c) are most of the code but only one runs at a time: a lighter optimization
+    # level compiles them much faster and they still run at full speed.
+    set(WPR_REL_OPT "-O1" CACHE STRING "Optimization flags for the minigame modules (rel_*.c)")
+    file(GLOB GEN_REL_SRC ${WPR_GEN_DIR}/rel_*.c)
+    if(NOT MSVC AND WPR_REL_OPT)
+        set_source_files_properties(${GEN_REL_SRC} PROPERTIES COMPILE_OPTIONS "${WPR_REL_OPT}")
+    endif()
 else()
     set(GEN_SRC runtime/src/no_game.c)
 endif()
 
 add_executable(wiiparty-native ${RUNTIME_SRC} ${GEN_SRC})
 target_include_directories(wiiparty-native PRIVATE runtime/include ${WPR_GEN_DIR})
-target_link_libraries(wiiparty-native PRIVATE SDL3::SDL3-static)
+target_link_libraries(wiiparty-native PRIVATE SDL3::SDL3-static enet)
 if(WIN32)
     target_link_libraries(wiiparty-native PRIVATE ws2_32)
 endif()

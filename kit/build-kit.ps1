@@ -51,7 +51,8 @@ if ($kit -match '\s') {  # the compiler tools trip over spaces in folder names
 }
 
 Write-Host 'Build Wii Party' -ForegroundColor Green
-Write-Host 'This makes the game from your own Wii Party disc. It takes a while (about 20-60 minutes) and'
+$started = Get-Date
+Write-Host 'This makes the game from your own Wii Party disc. It takes a while (about 10-40 minutes) and'
 Write-Host 'needs about 6 GB of free disc space. You can keep using your PC meanwhile.'
 
 # ------------------------------------------------------------------ the game folder
@@ -92,23 +93,44 @@ $env:PATH = "$gccBin;$cmakeBin;$env:PATH"
 $gen = Join-Path $work 'gen'
 $stamp = Join-Path $gen 'done.txt'
 if (-not ((Test-Path $stamp) -and ((Get-Content $stamp -Raw).Trim() -eq $game))) {
-    Step 'Translating the game code to C (10-20 minutes)'
+    Step 'Translating the game code to C (a few minutes)'
     if (Test-Path $gen) { Remove-Item -Recurse -Force $gen }
     $hle = Join-Path $src 'recomp\hle_SUPP01.json'
     & $py (Join-Path $src 'recomp\recompile.py') --dol (Join-Path $game 'sys\main.dol') --hle $hle --out $gen
     if ($LASTEXITCODE -ne 0) { Stop-Build 'Translating the main program failed. Send the text in this window to whoever helps you.' }
-    $rels = @(Get-ChildItem (Join-Path $game 'files\rel\*.rel.lz') | ForEach-Object { $_.FullName })
-    & $py (Join-Path $src 'recomp\rel.py') --rel @rels --dol-gen $gen --out $gen --hle $hle
+    # the minigames, several at once (one Python per core), biggest first so they finish together
+    $rels = @(Get-ChildItem (Join-Path $game 'files\rel\*.rel.lz') | Sort-Object Length -Descending | ForEach-Object { $_.FullName })
+    $workers = [Math]::Max(1, [Math]::Min([int]$env:NUMBER_OF_PROCESSORS, 12))
+    $groups = @(for ($w = 0; $w -lt $workers; $w++) { , @(for ($i = $w; $i -lt $rels.Count; $i += $workers) { $rels[$i] }) })
+    $procs = @()
+    for ($w = 0; $w -lt $workers; $w++) {
+        if (-not $groups[$w]) { continue }
+        $argList = @("`"$(Join-Path $src 'recomp\rel.py')`"", '--dol-gen', "`"$gen`"", '--out', "`"$gen`"", '--hle', "`"$hle`"", '--rel') +
+            @($groups[$w] | ForEach-Object { "`"$_`"" })
+        $proc = Start-Process -FilePath $py -ArgumentList $argList -NoNewWindow -PassThru `
+            -RedirectStandardOutput (Join-Path $work "translate-$w.txt") -RedirectStandardError (Join-Path $work "translate-$w-errors.txt")
+        $null = $proc.Handle  # without this, PowerShell forgets the exit code
+        $procs += $proc
+    }
+    $procs | Wait-Process
+    foreach ($p in $procs) {
+        if ($p.ExitCode -ne 0) {
+            Get-ChildItem (Join-Path $work 'translate-*-errors.txt') | Get-Content | Write-Host
+            Stop-Build 'Translating the minigames failed. Send the text in this window to whoever helps you.'
+        }
+    }
+    & $py (Join-Path $src 'recomp\rel.py') --dol-gen $gen --out $gen --hle $hle --rel  # the list of all of them
     if ($LASTEXITCODE -ne 0) { Stop-Build 'Translating the minigames failed. Send the text in this window to whoever helps you.' }
     Set-Content -Encoding UTF8 $stamp $game
 }
 
 # ------------------------------------------------------------------ compile
-Step 'Compiling (the longest part: 10-40 minutes)'
+Step 'Compiling (the longest part: 5-30 minutes, depending on the PC)'
 $build = Join-Path $work 'build'
 $cores = [int]$env:NUMBER_OF_PROCESSORS
 $ramGB = [int]((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
-$jobs = [Math]::Max(1, [Math]::Min($cores, [int]($ramGB / 2)))  # big files: about 2 GB per compiler
+$jobs = [Math]::Max(1, [Math]::Min($cores, [int][Math]::Floor(($ramGB - 2) / 1.2)))  # the biggest files need about 1 GB each
+Write-Host "Using $jobs of $cores processor cores ($ramGB GB of memory)."
 & cmake -S $src -B $build -G 'MinGW Makefiles' -DCMAKE_BUILD_TYPE=Release "-DWPR_GEN_DIR=$gen" `
     "-DCMAKE_MAKE_PROGRAM=$(Join-Path $gccBin 'make.exe')" -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -DCMAKE_SH=CMAKE_SH-NOTFOUND
 if ($LASTEXITCODE -ne 0) { Stop-Build 'Setting up the build failed. Send the text in this window to whoever helps you.' }
@@ -125,7 +147,7 @@ $ini = Join-Path $out 'settings.ini'
 if (-not (Test-Path $ini)) { Set-Content -Encoding ASCII $ini "disc=$game" }
 
 Write-Host ''
-Write-Host "Done! The game is in: $out" -ForegroundColor Green
+Write-Host "Done in $([int]((Get-Date) - $started).TotalMinutes) minutes! The game is in: $out" -ForegroundColor Green
 Write-Host 'Open that folder and double-click "Wii Party.bat". (You can delete the work and tools folders now.)'
 [void][System.Windows.Forms.MessageBox]::Show("Wii Party is ready!`r`n`r`nOpen the folder 'Wii Party' next to this kit and double-click 'Wii Party.bat'.", 'Build Wii Party')
 Start-Process explorer.exe $out
