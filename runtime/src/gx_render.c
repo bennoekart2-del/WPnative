@@ -665,7 +665,20 @@ static void light_channel(uint32_t ctl, const float vcol[4], uint32_t matreg, ui
     }
 }
 
+static int raster_dirty;
+int gx_tracing(void);
+static int raw_samples;  /* F9: raw vertices still to log for the next draw state */
+
 void gx_vertex(const GxRawVertex* rv, GxPipeVertex* out) {
+    if (raw_samples > 0 && raster_dirty && gx_tracing()) {
+        raw_samples--;
+        fprintf(stderr, "[gxv]   pos %.3f %.3f %.3f nrm %.3f %.3f %.3f pn %d/%d tex0 %.3f %.3f tex1 %.3f %.3f tex2 %.3f %.3f "
+                "tm %d:%d %d:%d %d:%d %d:%d col %d %.0f %.0f %.0f %.0f\n", rv->pos[0], rv->pos[1], rv->pos[2], rv->nrm[0][0],
+                rv->nrm[0][1], rv->nrm[0][2], rv->has_pnmtx, rv->pnmtx, rv->tex[0][0], rv->tex[0][1], rv->tex[1][0],
+                rv->tex[1][1], rv->tex[2][0], rv->tex[2][1], rv->has_tmtx[0], rv->tmtx[0], rv->has_tmtx[1], rv->tmtx[1],
+                rv->has_tmtx[2], rv->tmtx[2], rv->has_tmtx[3], rv->tmtx[3], rv->has_col[0], rv->col[0][0], rv->col[0][1],
+                rv->col[0][2], rv->col[0][3]);
+    }
     float p[3], q[3];
     p[0] = rv->pos[0]; p[1] = rv->pos[1]; p[2] = rv->pos[2];
     int pm = rv->has_pnmtx ? rv->pnmtx : (int)(g_cp_matidx_a & 63);
@@ -915,7 +928,7 @@ extern uint64_t g_xfb_copies;
 int g_gx_trace_request;  /* F9: log the next frame's draws to log.txt, for graphics bugs on a player's PC */
 static int tri_samples;  /* triangles logged for the current draw state */
 /* WPR_GX_TRACE=first-last (debugging): logs every draw state and EFB copy of those frames. */
-static int gx_tracing(void) {
+int gx_tracing(void) {
     static int lo = -1, hi = -1;
     if (lo == -1) {
         const char* e = getenv("WPR_GX_TRACE");
@@ -925,6 +938,7 @@ static int gx_tracing(void) {
     if (g_gx_trace_request) {
         g_gx_trace_request = 0;
         lo = hi = (int)g_xfb_copies + 1;
+        raw_samples = 3;
         fprintf(stderr, "[gx] F9: logging frame %d\n", lo);
     }
     return lo >= 0 && g_xfb_copies >= (uint64_t)lo && g_xfb_copies <= (uint64_t)hi;
@@ -939,6 +953,7 @@ static void trace_state(const RasterState* rs) {
             rs->regs[1][3], rs->regs[2][0], rs->regs[2][1], rs->regs[2][2], rs->regs[2][3], rs->regs[3][0], rs->regs[3][1],
             rs->regs[3][2], rs->regs[3][3]);
     tri_samples = 0;
+    raw_samples = 3;
     fprintf(stderr, "[gxs]   ind ss %06X %06X iref %06X mtx %06X %06X %06X | %06X %06X %06X | %06X %06X %06X cm %08X/%08X\n",
             g_bp[0x25], g_bp[0x26], g_bp[0x27], g_bp[0x06], g_bp[0x07], g_bp[0x08], g_bp[0x09], g_bp[0x0A], g_bp[0x0B],
             g_bp[0x0C], g_bp[0x0D], g_bp[0x0E], g_cp_matidx_a, g_cp_matidx_b);
@@ -949,13 +964,18 @@ static void trace_state(const RasterState* rs) {
                 t, g_xf[0x1040 + t], g_xf[0x1050 + t], tm, xff(tm * 4), xff(tm * 4 + 1), xff(tm * 4 + 2), xff(tm * 4 + 3),
                 xff(tm * 4 + 4), xff(tm * 4 + 5), xff(tm * 4 + 6), xff(tm * 4 + 7), xff(tm * 4 + 8), xff(tm * 4 + 9),
                 xff(tm * 4 + 10), xff(tm * 4 + 11));
+        int pb = 0x500 + (int)(g_xf[0x1050 + t] & 63) * 4;
+        if (g_xf[0x1012] & 1)
+            fprintf(stderr, "[gxs]     post %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f\n", xff(pb), xff(pb + 1),
+                    xff(pb + 2), xff(pb + 3), xff(pb + 4), xff(pb + 5), xff(pb + 6), xff(pb + 7), xff(pb + 8), xff(pb + 9),
+                    xff(pb + 10), xff(pb + 11));
     }
     fprintf(stderr, "[gxs]   proj %.3f %.3f %.3f %.3f %.3f %.3f type %u vp %.1f %.1f %.1f %.1f\n", xff(0x1020), xff(0x1021),
             xff(0x1022), xff(0x1023), xff(0x1024), xff(0x1025), g_xf[0x1026], xff(0x101A), xff(0x101B), xff(0x101D), xff(0x101E));
     for (int m = 0; m < 8; m++) {  /* texture map modes and sizes */
         int set = m < 4 ? 0 : 0x20, k = m & 3;
-        fprintf(stderr, "[gxs]   map%d img %06X mode %06X/%06X lut %06X\n", m, g_bp[0x88 + k + set], g_bp[0x80 + k + set],
-                g_bp[0x84 + k + set], g_bp[0x98 + k + set]);
+        fprintf(stderr, "[gxs]   map%d img %06X base %06X mode %06X/%06X lut %06X\n", m, g_bp[0x88 + k + set],
+                g_bp[0x94 + k + set], g_bp[0x80 + k + set], g_bp[0x84 + k + set], g_bp[0x98 + k + set]);
     }
     const char* dir = getenv("WPR_GX_TRACE_DIR");
     for (int st = 0; dir && st < rs->nstages; st++) {  /* each decoded texture once, as RGBA (PAM) */
@@ -1118,11 +1138,15 @@ static void triangle(const GxPipeVertex* v0, const GxPipeVertex* v1, const GxPip
         int front = (wh < 0 ? area : -area) > 0;
         if (cull == (front ? 2 : 1)) return;
     }
-    if (tri_samples < 2 && gx_tracing()) {
+    if (tri_samples < 4 && gx_tracing()) {
         tri_samples++;
-        for (int i = 0; i < 3; i++)
-            fprintf(stderr, "[gxt]   v%d %.1f %.1f z %.4f w %.3f tc0 %.3f %.3f %.3f tc1 %.3f %.3f %.3f\n", i, sx[i], sy[i], sz[i],
-                    v[i]->clip[3], v[i]->tc[0][0], v[i]->tc[0][1], v[i]->tc[0][2], v[i]->tc[1][0], v[i]->tc[1][1], v[i]->tc[1][2]);
+        for (int i = 0; i < 3; i++) {
+            fprintf(stderr, "[gxt]   v%d %.1f %.1f z %.4f w %.3f col %.0f %.0f %.0f %.0f", i, sx[i], sy[i], sz[i], v[i]->clip[3],
+                    v[i]->col[0][0], v[i]->col[0][1], v[i]->col[0][2], v[i]->col[0][3]);
+            for (int t = 0; t < v[i]->ntex && t < 8; t++)
+                fprintf(stderr, " tc%d %.3f %.3f %.3f", t, v[i]->tc[t][0], v[i]->tc[t][1], v[i]->tc[t][2]);
+            fprintf(stderr, "\n");
+        }
     }
     int cx0, cy0, cx1, cy1;
     scissor(&cx0, &cy0, &cx1, &cy1);
