@@ -119,7 +119,12 @@ static void assign_pads(void) {
         /* the keyboard and mouse are player 1, so gamepads fill players 2-4 first */
         static const int order[MAX_PLAYERS] = {1, 2, 3, 0};
         for (int j = 0; j < MAX_PLAYERS; j++)
-            if (!pads[order[j]]) { pads[order[j]] = SDL_OpenGamepad(ids[i]); break; }
+            if (!pads[order[j]]) {
+                pads[order[j]] = SDL_OpenGamepad(ids[i]);
+                const char* name = SDL_GetGamepadNameForID(ids[i]);
+                fprintf(stderr, "[input] player %d: %s\n", order[j] + 1, name ? name : "gamepad");
+                break;
+            }
     }
     SDL_free(ids);
 }
