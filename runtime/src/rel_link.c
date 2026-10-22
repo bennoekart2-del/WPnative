@@ -38,6 +38,7 @@ PPCFunc rel_lookup(uint32_t addr) {
             continue;
         }
         if (addr < hdr || addr >= hdr + m->size) continue;
+        if (g_rel_base[id & 255] != hdr) fprintf(stderr, "[rel] %s runs at %08X\n", m->name, hdr);  /* which minigame, for crash logs */
         g_rel_base[id & 255] = hdr;
         PPCFunc f = find_in(m, m->virt_base + (addr - hdr));
         if (f) return f;

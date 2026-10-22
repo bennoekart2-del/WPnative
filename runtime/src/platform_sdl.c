@@ -200,7 +200,10 @@ static KeySet p1_keys = {
     .shake = SDL_SCANCODE_LSHIFT, .shake2 = SDL_SCANCODE_RSHIFT, .grip = SDL_SCANCODE_F1,
     .swing_up = SDL_SCANCODE_T, .swing_down = SDL_SCANCODE_G, .tilt_fwd = SDL_SCANCODE_R, .tilt_back = SDL_SCANCODE_F,
     .tilt_left = SDL_SCANCODE_Q, .tilt_right = SDL_SCANCODE_E};
-static uint64_t wheel_up_until, wheel_down_until;  /* a mouse-wheel notch swings the Remote for a moment */
+static uint64_t wheel_up_until, wheel_down_until;
+#define MAX_G 3.4f  /* the most the Remote's accelerometer reports, in g */
+static uint64_t swing_start[MAX_PLAYERS];
+static float swing_dir[MAX_PLAYERS];  /* a mouse-wheel notch swings the Remote for a moment */
 static const KeySet no_keys = {SDL_SCANCODE_UNKNOWN};
 static float key_ptr[MAX_PLAYERS][2];
 static float tilt[MAX_PLAYERS][2];  /* current turn and lean angles, radians */
@@ -323,18 +326,26 @@ static void poll_input(void) {
         r->accel[0] = across;
         r->accel[2] = along;
         r->accel[1] = -sqrtf(fmaxf(0.0f, 1.0f - across * across - along * along));
-        if (down(keys, k->swing_up) || (p == 0 && now < wheel_up_until)) r->accel[1] += 3.0f;
-        if (down(keys, k->swing_down) || (p == 0 && now < wheel_down_until)) r->accel[1] -= 3.0f;
-        if (shake) {  /* a hard back-and-forth swing */
-            float ph = (float)(now % 66666667ull) / 66666667.0f;
-            r->accel[0] = ph < 0.5f ? 3.0f : -3.0f;
-            r->accel[1] = ph < 0.5f ? -3.5f : 1.5f;
-            r->accel[2] = ph < 0.5f ? 1.0f : -2.0f;
+        /* A swing is a hard push (as hard as the Remote measures) and then the stop, like an arm;
+         * a held key or more wheel notches swing again every 0.3 s. */
+        int su = down(keys, k->swing_up) || (p == 0 && now < wheel_up_until);
+        int sd = down(keys, k->swing_down) || (p == 0 && now < wheel_down_until);
+        if ((su || sd) && now - swing_start[p] > 300000000ull) {
+            swing_start[p] = now;
+            swing_dir[p] = su ? 1.0f : -1.0f;
+        }
+        float st = (float)(now - swing_start[p]) / 1e9f;
+        if (swing_start[p] && st < 0.22f) r->accel[1] += swing_dir[p] * (st < 0.12f ? MAX_G : -2.5f);
+        if (shake) {
+            /* as hard as possible in every direction: full scale on all three axes, flipping every frame */
+            static const float dirs[4][3] = {{1, -1, 1}, {-1, 1, -1}, {1, 1, -1}, {-1, -1, 1}};
+            const float* d = dirs[(now / 16666667ull) & 3];
+            for (int i = 0; i < 3; i++) r->accel[i] = d[i] * MAX_G;
         }
 
         /* pointer: mouse (player 1, once it moves), right stick, or the direction keys */
         float* kp = key_ptr[p];
-        float sp = 1.3f * dt;
+        float sp = 2.2f * dt;  /* screen widths (2.0) per second */
         int mouse_active = p == 0 && mouse_moved_ns && now - mouse_moved_ns < 3000000000ull;
         if (!sideways && !mouse_active) {
             kp[0] += (kr - kl) * sp;
@@ -342,8 +353,9 @@ static void poll_input(void) {
         }
         if (g) {
             float sx = axis(g, SDL_GAMEPAD_AXIS_RIGHTX), sy = axis(g, SDL_GAMEPAD_AXIS_RIGHTY);
-            kp[0] += sx * sp * 1.5f;
-            kp[1] += sy * sp * 1.5f;
+            /* fast when pushed all the way, still precise when pushed a little */
+            kp[0] += sx * fabsf(sx) * sp * 1.6f;
+            kp[1] += sy * fabsf(sy) * sp * 1.6f;
         }
         if (kp[0] < -1) kp[0] = -1;
         if (kp[0] > 1) kp[0] = 1;
