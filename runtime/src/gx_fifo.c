@@ -287,11 +287,24 @@ static void load_bp(uint32_t v) {
     }
 }
 
+/* XF has its own copy of the matrix index registers (0x1018/0x1019), and the hardware keeps one
+ * value: whichever of the CP or XF write came last is what selects the matrices. NW4R material
+ * display lists set them through XF only, so ignoring these writes put wrong texture matrices on
+ * the dice pips. */
+static void xf_written(uint32_t addr, uint32_t count) {
+    static int noted;
+    if (addr <= 0x1018 && addr + count > 0x1018 && g_xf[0x1018] != g_cp_matidx_a && noted < 3)
+        fprintf(stderr, "[gx] XF matrix index %08X replaces CP %08X\n", g_xf[0x1018], g_cp_matidx_a), noted++;
+    if (addr <= 0x1018 && addr + count > 0x1018) g_cp_matidx_a = g_xf[0x1018];
+    if (addr <= 0x1019 && addr + count > 0x1019) g_cp_matidx_b = g_xf[0x1019];
+}
+
 static void load_indexed_xf(int array, uint32_t v) {
     uint32_t idx = v >> 16, n = ((v >> 12) & 15) + 1, addr = v & 0xFFF;
     uint32_t src = 0x80000000u | (g_cp_array_base[array] + idx * g_cp_array_stride[array]);
     for (uint32_t i = 0; i < n; i++)
         if (addr + i < 0x1100) g_xf[addr + i] = mem_r32(src + 4 * i);
+    xf_written(addr, n);
 }
 
 /* Decode as many complete commands as `buf` holds; returns bytes consumed. */
@@ -313,6 +326,7 @@ static size_t decode(const uint8_t* buf, size_t len, int depth) {
             if (p + need > len) break;
             for (uint32_t i = 0; i < count; i++)
                 if (addr + i < 0x1100) g_xf[addr + i] = rd32(buf + p + 5 + 4 * i);
+            xf_written(addr, count);
             stats.xf_writes += count;
         } else if ((cmd & 0xE7) == 0x20) {  /* LOAD_INDX_A..D: arrays 12..15 into XF memory */
             need = 5;
