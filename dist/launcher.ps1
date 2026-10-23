@@ -566,7 +566,7 @@ $chooseBtn = Add-Pill $pPlay 'Choose folder...' 222 410 136 36 'white' (New-Font
 $noGameBtn = Add-Pill $pPlay "I don't have it yet" 364 410 144 36 'white' (New-Font 13 'Bold')
 Add-Text $pPlay ("Keyboard and mouse: point with the mouse, left click = A, right click = B. " +
     "A gamepad works too: press a button on it once the game is open. More players on this PC: see Settings.") 80 488 430 60 $fSmall | Out-Null
-Add-Text $pPlay "In the game: F11 = full screen, F1 = hold the Remote sideways or upright." 48 552 460 36 $fSmall $muted | Out-Null
+$playHint = Add-Text $pPlay "In the game: F11 = full screen, F1 = hold the Remote sideways or upright." 48 552 460 36 $fSmall $muted
 $play = Add-Pill $pPlay 'PLAY' 544 376 182 100 'pink' (New-Font 38 'Bold')
 $playStatus = Add-Text $pPlay '' 540 488 190 96 $fSmall $muted
 $playStatus.TextAlign = 'TopCenter'
@@ -719,6 +719,57 @@ Set-Bounds $side 44 360 400 28; $side.Checked = $cfg.sideways -eq '1'; $pSet.Con
 Add-Text $pSet "If the game is slow, pick a lower picture quality. 'Automatic' picks what suits your screen." 44 398 400 44 $fSmall $muted | Out-Null
 $resetAll = Add-Pill $pSet 'Back to recommended settings' 44 452 280 40 'white'
 $resetAll.Add_Click({ $scale.SelectedIndex = 0; $players.SelectedIndex = 0; $aspect.SelectedIndex = 0; $full.Checked = $true; $side.Checked = $false })
+
+# ---- updates (only for a game made with the build kit or the GitHub download: they sit one folder up)
+$kitBase = Split-Path -Parent $dir
+$updateScript = @((Join-Path $kitBase 'kit\update.ps1'), (Join-Path $kitBase 'source\kit\update.ps1')) |
+    Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+$updateTask = $null
+if ($updateScript) {
+    $versionFile = Join-Path $kitBase 'version.txt'
+    $haveVersion = if (Test-Path $versionFile) { (Get-Content $versionFile -Raw).Trim() } else { '' }
+    $updateBtn = Add-Pill $pSet 'Update the game' 44 530 200 40 'white'
+    $updateInfo = Add-Text $pSet 'Looking for a newer version...' 258 530 480 44 $fSmall $muted
+    # ask GitHub in the background; a timer on this window picks up the answer
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $wc = New-Object System.Net.WebClient
+        $wc.Headers.Add('User-Agent', 'WiiPartyLauncher'); $wc.Headers.Add('Accept', 'application/vnd.github.sha')
+        $updateTask = $wc.DownloadStringTaskAsync('https://api.github.com/repos/bennoekart2-del/WPnative/commits/main')
+    } catch { $updateInfo.Text = "Couldn't check for updates." }
+    $updateTimer = New-Object System.Windows.Forms.Timer
+    $updateTimer.Interval = 500
+    $updateTimer.Add_Tick({
+        if (-not $script:updateTask -or -not $script:updateTask.IsCompleted) { return }
+        $updateTimer.Stop()
+        if ($script:updateTask.Status -ne 'RanToCompletion') { $updateInfo.Text = "Couldn't check for updates (no internet?). You can still press Update."; return }
+        $latest = $script:updateTask.Result.Trim()
+        if ($latest -eq $haveVersion) {
+            $updateInfo.Text = "You have the newest version ($($latest.Substring(0, 7)))."
+        } else {
+            $updateInfo.ForeColor = $pink
+            $updateInfo.Text = 'A new version is out! Press Update. Friends you play online with need the same version.'
+            Set-PillStyle $updateBtn 'pink'
+            $playHint.ForeColor = $pink; $playHint.Font = $fBold
+            $playHint.Text = 'A new version is out: Settings > Update the game.'
+        }
+    })
+    $updateTimer.Start()
+    $updateBtn.Add_Click({
+        $r = [System.Windows.Forms.MessageBox]::Show(("Download the newest version from GitHub and build it again with your disc?`r`n`r`n" +
+            "A black window shows how it goes. It takes a few minutes (up to 40 if a lot changed). Your settings stay. " +
+            "The launcher opens again when it's done."), 'Update Wii Party', 'OKCancel', 'Question')
+        if ($r -ne 'OK') { return }
+        # run a copy: the update replaces update.ps1 itself
+        $workDir = Join-Path $kitBase 'work'
+        New-Item -ItemType Directory -Force $workDir | Out-Null
+        $run = Join-Path $workDir 'update-run.ps1'
+        Copy-Item -Force -LiteralPath $updateScript $run
+        Read-Settings; Save-Settings
+        Start-Process -FilePath 'powershell' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$run`"", '-Base', "`"$kitBase`"")
+        $form.Close()
+    })
+}
 
 # ---- Controls page
 $pKeys = New-Page 'Controls' {

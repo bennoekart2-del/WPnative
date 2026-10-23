@@ -40,6 +40,11 @@ first build.
 
 If Windows says "Windows protected your PC", press **More info** and then **Run anyway**.
 
+**Updating.** In the launcher, Settings > **Update the game** downloads the newest version from
+GitHub and builds it again with your disc. Your settings stay, and only what changed is compiled
+again, so it is usually much quicker than the first build. When a new version is out, the launcher
+says so on the Play page. Everyone playing online together needs the same version.
+
 ## Controls
 
 One player per PC by default: the keyboard, the mouse and one gamepad all play player 1. For more

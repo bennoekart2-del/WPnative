@@ -18,5 +18,9 @@ is not included: you need your own disc, copied to your PC once with Dolphin.
 4. Open the new "Wii Party" folder and double-click "Wii Party.bat".
    To play online: Online tab > type the room code your friend sent you > JOIN.
 
+5. Updating later: in the launcher, Settings > "Update the game". It downloads the newest
+   version and builds it again with your disc. Friends playing online together need the
+   same version, so update together.
+
 If Windows says "Windows protected your PC": press "More info", then "Run anyway".
 If something goes wrong, send a screenshot of the black window to whoever helps you.

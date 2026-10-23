@@ -2,6 +2,8 @@
 # Downloads a C compiler (w64devkit), CMake and Python into tools\, translates the game's code from
 # the disc folder into C (work\gen), compiles it, and puts the finished game in "Wii Party\".
 # Nothing from the disc leaves this PC; the result is for this player only.
+# -Update: started by update.ps1 after it replaced the source; it shows its own messages at the end.
+param([switch]$Update)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -96,7 +98,11 @@ $env:PATH = "$gccBin;$cmakeBin;$env:PATH"
 # ------------------------------------------------------------------ translate
 $gen = Join-Path $work 'gen'
 $stamp = Join-Path $gen 'done.txt'
-if (-not ((Test-Path $stamp) -and ((Get-Content $stamp -Raw).Trim() -eq $game))) {
+# translated again when the disc folder or the translator changes (an update may change it)
+$translator = (Get-ChildItem (Join-Path $src 'recomp') -File | Where-Object { $_.Extension -in '.py', '.json' } | Sort-Object Name |
+    ForEach-Object { (Get-FileHash -Algorithm MD5 $_.FullName).Hash }) -join ''
+$want = "$game $((Get-FileHash -Algorithm MD5 -InputStream ([IO.MemoryStream]::new([Text.Encoding]::ASCII.GetBytes($translator)))).Hash)"
+if (-not ((Test-Path $stamp) -and ((Get-Content $stamp -Raw).Trim() -eq $want))) {
     Step 'Translating the game code to C (a few minutes)'
     if (Test-Path $gen) { Remove-Item -Recurse -Force $gen }
     $hle = Join-Path $src 'recomp\hle_SUPP01.json'
@@ -127,7 +133,7 @@ if (-not ((Test-Path $stamp) -and ((Get-Content $stamp -Raw).Trim() -eq $game)))
     }
     & $py (Join-Path $src 'recomp\rel.py') --dol-gen $gen --out $gen --hle $hle --rel  # the list of all of them
     if ($LASTEXITCODE -ne 0) { Stop-Build 'Translating the minigames failed. Send the text in this window to whoever helps you.' }
-    Set-Content -Encoding UTF8 $stamp $game
+    Set-Content -Encoding UTF8 $stamp $want
 }
 
 # ------------------------------------------------------------------ compile
@@ -154,6 +160,7 @@ if (-not (Test-Path $ini)) { Set-Content -Encoding ASCII $ini "disc=$game" }
 
 Write-Host ''
 Write-Host "Done in $([int]((Get-Date) - $started).TotalMinutes) minutes! The game is in: $out" -ForegroundColor Green
+if ($Update) { exit 0 }
 Write-Host 'Open that folder and double-click "Wii Party.bat". (You can delete the work and tools folders now.)'
 [void][System.Windows.Forms.MessageBox]::Show("Wii Party is ready!`r`n`r`nOpen the folder 'Wii Party' next to this kit and double-click 'Wii Party.bat'.", 'Build Wii Party')
 Start-Process explorer.exe $out
